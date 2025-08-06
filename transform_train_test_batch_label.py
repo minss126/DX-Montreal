@@ -12,7 +12,6 @@ from pathlib import Path
 warnings.filterwarnings("ignore", category=UserWarning, module="sklearn")
 warnings.filterwarnings("ignore", category=pd.errors.PerformanceWarning)
 
-
 # ===================================================================
 # LDP 메커니즘 로더 클래스 (Numerical)
 # ===================================================================
@@ -143,10 +142,10 @@ class DatasetTransformer:
     def __init__(self, args):
         self.args = args
         raw_df = pd.read_csv(args.csv_path)
-        
         if args.label_col not in raw_df.columns:
             raise ValueError(f"지정한 레이블 칼럼 '{args.label_col}'이 데이터셋에 없습니다.")
-
+        if self.args.transform_label_log:
+            raw_df[args.label_col] = np.log1p(raw_df[args.label_col])
         miss = raw_df.isna().mean()
         drop_cols = [c for c, m in miss.items() if m > 0.5 and c != args.label_col]
         if drop_cols:
@@ -333,19 +332,14 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(
         description="LDP 메커니즘으로 CSV 데이터셋을 배치 변환합니다."
     )
-
-    # ── 새 인자: 에피실론 리스트 ───────────────────────
-    parser.add_argument('--eps_list', type=float, nargs='+', default=[1.0,2.0,3.0,4.0,5.0],
-                        help='공백으로 구분된 피처 epsilon 목록')
-    parser.add_argument('--label_eps_list', type=float, nargs='+', default=[1.0,3.0,5.0],
-                        help='공백으로 구분된 레이블 epsilon 목록')
-
+    
     # 기존 인자 (일부 생략 없이 그대로 유지)
-    parser.add_argument('--N', type=int, default=31)
+    parser.add_argument('--eps', type=float, default=1)
+    parser.add_argument('--N', type=int, default=7)
     parser.add_argument('--label_N', type=int, default=15)
     parser.add_argument('--label_epsilon', type=float, default=None)
     parser.add_argument('--obj', type=str, default='avg', choices=['avg', 'worst'])
-    parser.add_argument('--csv_path', type=str, default='data/wine.csv')
+    parser.add_argument('--csv_path', type=str, default='data/OnlineNewsPopularity.csv')
     parser.add_argument('--label_col', type=str, default='label')
     parser.add_argument('--output_dir', type=str, default='transformed_data_batch_label')
     parser.add_argument('--with_categorical', type=str2bool, default=False)
@@ -353,16 +347,15 @@ if __name__ == '__main__':
     parser.add_argument('--transform_label_categorical', type=str2bool, default=False)
     parser.add_argument('--test_size', type=float, default=0.2)
     parser.add_argument('--random_state', type=int, default=42)
+    parser.add_argument('--transform_label_log', type=str2bool, default=False)
 
     # 다중 시드 지원
     parser.add_argument('--seed', type=int, default=0)
-    parser.add_argument('--seeds', type=str, default='0')
+    parser.add_argument('--seeds', type=str, default=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9])
 
     args = parser.parse_args()
 
     seeds_to_run = args.seeds
-    eps_list = args.eps_list
-    label_eps_list = args.label_eps_list
 
     dataset_name = Path(args.csv_path).stem
     args.output_dir = Path(args.output_dir) / dataset_name
@@ -373,19 +366,14 @@ if __name__ == '__main__':
         np.random.seed(current_seed)
         print(f"\n--- Seed {current_seed} 시작 ---")
 
-        for eps in eps_list:
-            for label_eps in label_eps_list:
-                args.eps = eps
-                args.label_epsilon = label_eps
+        print(f"\n=== Transform: ε={args.eps}, label ε={args.label_epsilon} ===")
+        transformer = DatasetTransformer(args)
 
-                print(f"\n=== Transform: ε={eps}, label ε={label_eps} ===")
-                transformer = DatasetTransformer(args)
+        start = time.time()
+        train_df, test_df = transformer.transform()
+        print(f"    -> 변환 완료: {time.time() - start:.2f} 초")
 
-                start = time.time()
-                train_df, test_df = transformer.transform()
-                print(f"    -> 변환 완료: {time.time() - start:.2f} 초")
-
-                transformer.save(train_df, args.output_dir, "_train")
-                transformer.save(test_df,   args.output_dir, "_test")
+        transformer.save(train_df, args.output_dir, "_train")
+        transformer.save(test_df,   args.output_dir, "_test")
 
     print("\n✨ 모든 변환 작업이 완료되었습니다.")
