@@ -111,6 +111,7 @@ class LinearExperiment:
             pred_ldp = X_ldp_test @ beta_ldp
             if cfg.transform_label_log:
                 y_orig_train, y_orig_test = np.expm1(y_orig_train), np.expm1(y_orig_test)
+                y_ldp_test = np.expm1(y_ldp_test)
                 pred_orig, pred_ldp = np.expm1(pred_orig), np.expm1(pred_ldp)
 
             def get_regression_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, float]:
