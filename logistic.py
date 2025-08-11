@@ -1,18 +1,18 @@
 import argparse
 import traceback
 from pathlib import Path
-from typing import Dict, Tuple, Any
+from typing import Dict, Tuple
 
 import numpy as np
 import pandas as pd
-from sklearn.metrics import (accuracy_score, roc_auc_score, precision_score,
-                             recall_score, f1_score, roc_curve)
+from sklearn.metrics import accuracy_score, roc_auc_score, roc_curve
 from sklearn.preprocessing import StandardScaler
+import json
+import logging
 
 # ===================================================================
 # HE 연산 플레이스홀더
 # ===================================================================
-# 동형암호(HE) 기반 훈련은 현재 구현되지 않은 플레이스홀더입니다.
 def he_dot(a_enc: np.ndarray, b_enc: np.ndarray) -> np.ndarray:
     return a_enc @ b_enc
 
@@ -23,21 +23,17 @@ def he_decrypt_vector(v_enc: np.ndarray) -> np.ndarray:
 # 로지스틱 회귀 실험 클래스
 # ===================================================================
 class LogisticExperiment:
-    """LDP로 보호된 데이터셋으로 로지스틱 회귀 모델을 학습하고 평가합니다."""
 
     def __init__(self, config: argparse.Namespace):
-        """실험 설정 초기화"""
         self.config = config
         self.output_dir = Path(config.output_dir)
         np.random.seed(config.seed)
 
     def _sigmoid(self, z: np.ndarray) -> np.ndarray:
-        """시그모이드 함수 (수치적 안정성을 위한 클리핑 포함)"""
         z = np.clip(z, -500, 500)
         return 1 / (1 + np.exp(-z))
 
     def _train_gd(self, X: np.ndarray, y: np.ndarray) -> np.ndarray:
-        """L2 정규화를 적용한 경사 하강법으로 모델 학습"""
         beta = np.zeros(X.shape[1])
         n_samples = len(y)
         cfg = self.config
@@ -45,10 +41,10 @@ class LogisticExperiment:
         for _ in range(cfg.epochs):
             p = self._sigmoid(X @ beta)
             
-            # 그래디언트 계산 (정규화 항 포함)
+            # L2 정규화 (절편(bias) 항은 제외)
             grad_unregularized = X.T @ (p - y) / n_samples
             grad_regularization = cfg.regularization_lambda * beta
-            grad_regularization[0] = 0  # 절편(bias) 항은 정규화에서 제외
+            grad_regularization[0] = 0
             
             total_grad = grad_unregularized + grad_regularization
             beta -= cfg.learning_rate * total_grad
@@ -56,44 +52,49 @@ class LogisticExperiment:
         return beta
 
     def _impute(self, df_train: pd.DataFrame, df_apply: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """Train 데이터의 평균으로 결측치 대체"""
+        """ Train 데이터의 평균으로 결측치 대체 """
         train_mean = df_train.mean()
         return df_train.fillna(train_mean), df_apply.fillna(train_mean)
 
     def _scale(self, df_train: pd.DataFrame, df_apply: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """StandardScaler로 피처 스케일링 (평균 0, 표준편차 1)"""
+        """ 피처 스케일링 : StandardScaler """
         scaler = StandardScaler()
         train_scaled = pd.DataFrame(scaler.fit_transform(df_train), columns=df_train.columns, index=df_train.index)
         apply_scaled = pd.DataFrame(scaler.transform(df_apply), columns=df_apply.columns, index=df_apply.index)
         return train_scaled.fillna(0), apply_scaled.fillna(0)
         
     def _find_optimal_threshold(self, y_true: np.ndarray, y_score: np.ndarray) -> float:
-        """Youden's J statistic을 이용한 최적의 분류 임계값 탐색"""
+        """ 최적의 분류 임계값 : Youden's J statistic """
         fpr, tpr, thresholds = roc_curve(y_true, y_score)
         youden_j = tpr - fpr
         return thresholds[np.argmax(youden_j)]
 
     def run(self) -> pd.DataFrame:
-        """실험 전체 과정 실행 및 결과 반환"""
         try:
-            # --- 1. 데이터 준비 ---
+            # --- 1. 데이터 로드 및 전처리 ---
             cfg = self.config
-            base_filename = (f"{Path(cfg.csv_path).stem}_Eps{cfg.eps:.1f}_N{cfg.N}_avg_"
-                             f"Leps{cfg.label_eps}_LN{cfg.label_N}_seed{cfg.seed}")
+            base_filename_stem = Path(cfg.csv_path).stem
+            base_filename = (f"{base_filename_stem}_Eps{cfg.eps[0]:.1f}_N{cfg.N}_avg_"
+                             f"Leps{cfg.label_eps[0]:.1f}_LN{cfg.label_N}_seed{cfg.seed}")
 
             # 원본 및 LDP 데이터 로드
-            orig_df = pd.read_csv(cfg.csv_path).select_dtypes(include='number')
-            train_ldp_df = pd.read_csv(self.output_dir / f"{base_filename}_train.csv", index_col=0).select_dtypes(include='number')
-            test_ldp_df = pd.read_csv(self.output_dir / f"{base_filename}_test.csv", index_col=0).select_dtypes(include='number')
+            orig = pd.read_csv(cfg.csv_path)
+            num_cols = orig.select_dtypes(include='number')
+            drop_cols = num_cols.columns[num_cols.isna().mean() > 0.4]
+            orig_full = orig.drop(columns=drop_cols).select_dtypes(include='number')
+
+            # LDP 변환 데이터 로드
+            train_ldp = pd.read_csv(self.output_dir / f"{base_filename}_train.csv", index_col=0).select_dtypes(include='number')
+            test_ldp = pd.read_csv(self.output_dir / f"{base_filename}_test.csv", index_col=0).select_dtypes(include='number')
             
             # 원본 데이터를 LDP 데이터와 동일한 인덱스로 정렬
-            train_orig_df = orig_df.loc[train_ldp_df.index].reset_index(drop=True)
-            test_orig_df = orig_df.loc[test_ldp_df.index].reset_index(drop=True)
+            train_orig = orig_full.loc[train_ldp.index].reset_index(drop=True)
+            test_orig = orig_full.loc[test_ldp.index].reset_index(drop=True)
             
             # 결측치 처리 및 스케일링
-            feats = [c for c in train_ldp_df.columns if c != cfg.label_col]
-            train_orig_imp, test_orig_imp = self.impute(train_orig_df, test_orig_df)
-            train_ldp_imp, test_ldp_imp = self.impute(train_ldp_df, test_ldp_df)
+            feats = [c for c in train_ldp.columns if c != cfg.label_col]
+            train_orig_imp, test_orig_imp = self._impute(train_orig, test_orig)
+            train_ldp_imp, test_ldp_imp = self._impute(train_ldp, test_ldp)
             train_orig_scaled, test_orig_scaled = self._scale(train_orig_imp[feats], test_orig_imp[feats])
             train_ldp_scaled, test_ldp_scaled = self._scale(train_ldp_imp[feats], test_ldp_imp[feats])
 
@@ -123,10 +124,7 @@ class LogisticExperiment:
                     return {'Accuracy': accuracy_score(y_true, y_pred_class), 'AUC': np.nan, 'Precision': np.nan, 'Recall': np.nan, 'F1': np.nan}
                 return {
                     'Accuracy': accuracy_score(y_true, y_pred_class),
-                    'AUC': roc_auc_score(y_true, y_pred_prob),
-                    'Precision': precision_score(y_true, y_pred_class, zero_division=0),
-                    'Recall': recall_score(y_true, y_pred_class, zero_division=0),
-                    'F1': f1_score(y_true, y_pred_class, zero_division=0)
+                    'AUC': roc_auc_score(y_true, y_pred_prob)
                 }
 
             results = {
@@ -134,97 +132,121 @@ class LogisticExperiment:
                 'LDP': get_classification_metrics(y_ldp_test, pred_ldp_class, prob_ldp)
             }
             df_scores = pd.DataFrame(results).T.round(3)
-            print("Model Performance (Classification):\n", df_scores)
+            logging.info("Model Performance (Regression):\n%s", df_scores)
             return df_scores
         
         except Exception as e:
-            print(f'실험 실행 중 오류 발생: {e}')
-            traceback.print_exc()
+            logging.error(f'실험 실행 중 오류 발생: {e}')
+            logging.error(traceback.format_exc())
             return None
 
 # ===================================================================
 # 결과 파일 관리 유틸리티
 # ===================================================================
 def get_total_features(csv_path: Path, label_col: str) -> int:
-    """데이터셋의 최종 피처 개수 계산"""
+    """ 데이터셋의 최종 피처 개수 계산 """
     df = pd.read_csv(csv_path)
     num_cols = df.select_dtypes(include='number')
     miss_cols = num_cols.columns[num_cols.isna().mean() > 0.4]
     final_cols = num_cols.drop(columns=miss_cols)
     return len([col for col in final_cols.columns if col != label_col])
 
-def manage_result_file_header(result_file: Path, config: argparse.Namespace):
-    """실험 결과 파일의 헤더를 관리 (필요시 작성)"""
-    header_content = (
-        f"\n{'='*50}\n"
-        f"Dataset: {Path(config.csv_path).stem}\n"
-        f"Total Features: {get_total_features(Path(config.csv_path), config.label_col)}\n"
-        f"N: {config.N} / label_N: {config.label_N}\n"
-        f"Regularization Lambda: {config.regularization_lambda}\n"
-        f"--- Classification Results by Epsilon ---\n"
-        f"Model,Accuracy,AUC,Precision,Recall,F1\n"
-    )
-    
-    # 파일이 없거나 내용이 비어있으면 새로 작성
-    if not result_file.exists() or result_file.stat().st_size == 0:
-        result_file.write_text(header_content)
-    else:
-        # 파일 내용은 있지만, 현재 데이터셋에 대한 헤더가 없으면 추가
-        content = result_file.read_text()
-        if f"Dataset: {Path(config.csv_path).stem}" not in content:
-            with result_file.open('a') as f:
-                f.write(header_content)
-
 # ===================================================================
 # 메인 실행 로직
 # ===================================================================
 def main(args: argparse.Namespace):
-    """스크립트의 메인 실행 로직"""
-    result_file = Path(args.result_csv)
-    result_file.parent.mkdir(parents=True, exist_ok=True)
+    # 1. 기존 CSV 결과 파일 준비 (헤더 작성)
+    total_result_file = Path(args.total_result_csv)
+    total_result_file.parent.mkdir(parents=True, exist_ok=True)
+    total_features = get_total_features(Path(args.csv_path), args.label_col)
+
+    with open(total_result_file, 'a', newline='') as f:
+        f.write("\n" + "="*50 + "\n")
+        f.write(f"N: {args.N} / label_N: {args.label_N} / eps: {args.eps[0]} / label_eps: {args.label_eps[0]}\n")
+
+    # 2. label 변환 여부 별로 각 Epsilon 조합에 대해 실험 반복
+    # 2.1. 현재 실험 설정을 기반으로 결과 폴더 경로 생성
+    exp_name = (f"eps{args.eps[0]}_label-eps{args.label_eps[0]}_N{args.N}_LN{args.label_N}_"
+                f"lr{args.learning_rate}_reg{args.regularization_lambda}")
+    exp_dir = Path(args.result_dir) / Path(args.csv_path).stem / exp_name
+    exp_dir.mkdir(parents=True, exist_ok=True)
+
+    # 2.2. 로거 설정 (실험 폴더에 run.log 파일 생성)
+    log_file = exp_dir / 'run.log'
+    # 이전 핸들러 제거
+    for handler in logging.root.handlers[:]:
+        logging.root.removeHandler(handler)
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s [%(levelname)s] %(message)s',
+        handlers=[
+            logging.FileHandler(log_file),
+            logging.StreamHandler()
+        ]
+    )
+
+    logging.info(f"\n--- Running for eps={args.eps}, label_eps={args.label_eps} (Avg over {len(args.seeds)} seeds) ---")
+    logging.info(f"Results will be saved in: {exp_dir}")
+
+    # 2.3. 메타데이터 저장 (metadata.json)
+    # seed는 개별 실행마다 다르므로, 메타데이터에서는 리스트로 전체를 보여줌
+    metadata = vars(args).copy()
+    metadata['total_features'] = total_features
     
-    # 결과 파일 헤더 관리
-    manage_result_file_header(result_file, args)
+    serializable_metadata = {
+        key: str(value) if isinstance(value, Path) else value
+        for key, value in metadata.items()
+    }
+
+    with open(exp_dir / 'metadata.json', 'w') as f:
+        json.dump(serializable_metadata, f, indent=4)
+
+    # 2.4. 각 시드에 대해 개별 실험 실행
+    for seed in args.seeds:
+        logging.info(f"--- Running seed: {seed} ---")
+        current_config = argparse.Namespace(**metadata)
+        current_config.eps = args.eps
+        current_config.label_eps = args.label_eps
+        current_config.seed = seed
+        
+        exp = LogisticExperiment(current_config)
+        result_df = exp.run()
+
+        # 2.5. 개별 시드 결과 저장 (results_seed_X.pkl)
+        if result_df is not None:
+            result_path = exp_dir / f'results_seed_{seed}.pkl'
+            result_df.to_pickle(result_path)
+            logging.info(f"Saved seed {seed} results to {result_path}")
     
-    seeds_to_run = args.seeds
-    eps_list = args.eps_list
-    label_eps_list = args.label_eps_list
+    # 2.6. 모든 시드 결과 취합 및 평균 계산
+    all_seed_results = []
+    for pkl_file in exp_dir.glob("results_seed_*.pkl"):
+        df = pd.read_pickle(pkl_file)
+        all_seed_results.append(df)
 
-    # 각 Epsilon 조합에 대해 실험 반복
-    for eps in eps_list:
-        for label_eps in label_eps_list:
-            print(f"\n--- Running for eps={eps}, label_eps={label_eps} (Avg over {len(seeds_to_run)} seeds) ---")
-            
-            with result_file.open('a') as f:
-                f.write(f"eps(per-feature): {eps} / eps(label): {label_eps}\n")
+    if not all_seed_results:
+        logging.warning("해당 epsilon 설정에 대한 결과가 없습니다.")
+    
+    mean_df = (pd.concat(all_seed_results)
+               .groupby(level=0)
+               .mean()
+               .round(3)
+               .reset_index()
+               .rename(columns={'index': 'Model'}))
+    
+    logging.info("--- Averaged Results ---")
+    logging.info("\n%s", mean_df.to_string())
 
-            try:
-                all_seed_results = []
-                for seed in seeds_to_run:
-                    # 현재 루프의 파라미터로 config 업데이트
-                    current_config = args
-                    current_config.eps = eps
-                    current_config.label_eps = label_eps
-                    current_config.seed = seed
-                    
-                    exp = LogisticExperiment(current_config)
-                    result_df = exp.run()
-                    if result_df is not None:
-                        all_seed_results.append(result_df)
-                
-                if not all_seed_results: continue
-
-                # 여러 시드의 결과 평균 계산 및 저장
-                mean_df = (pd.concat(all_seed_results)
-                           .groupby(level=0).mean().round(3)
-                           .reset_index().rename(columns={'index': 'Model'}))
-                mean_df.to_csv(result_file, mode='a', header=False, index=False)
-
-            except Exception as e:
-                print(f'Epsilon {eps}, Label Epsilon {label_eps} 루프에서 오류 발생:', e)
+    # 2.7. 평균 결과를 pkl 및 csv로 저장
+    mean_df.to_pickle(exp_dir / 'results_mean.pkl')
+    mean_df.to_csv(exp_dir / 'results_mean.csv', index=False)
+    
+    # 2.8.통합 CSV 파일에 평균 결과 추가
+    with open(total_result_file, 'a', newline='') as f:
+        f.write("\nModel,Accuracy,AUC\n")
+        mean_df.to_csv(f, header=False, index=False, lineterminator='\n')
 
     print("\n✅ 모든 작업이 성공적으로 완료되었습니다.")
-
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(
@@ -232,15 +254,16 @@ if __name__ == '__main__':
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
     # --- 실험 설정 ---
-    parser.add_argument('--eps_list', type=float, nargs='+', default=[1.0,2.0,3.0,4.0,5.0], help='공백으로 구분된 피처 epsilon 목록')
-    parser.add_argument('--label_eps_list', type=float, nargs='+', default=[1.0,3.0,5.0], help='공백으로 구분된 레이블 epsilon 목록')
+    parser.add_argument('--eps', type=float, nargs='+', default=3.0, help='공백으로 구분된 피처 epsilon 목록')
+    parser.add_argument('--label_eps', type=float, nargs='+', default=3.0, help='공백으로 구분된 레이블 epsilon 목록')
     parser.add_argument('--seeds', type=int, nargs='+', default=[0,1,2,3,4,5,6,7,8,9], help='실행할 랜덤 시드 목록 (공백으로 구분)')
     
     # --- 데이터 및 경로 ---
     parser.add_argument('--csv_path', type=str, default='data/gamma.csv', help='입력 원본 데이터 CSV 경로')
     parser.add_argument('--label_col', type=str, default='label', help='레이블 칼럼 이름')
-    parser.add_argument('--output_dir', type=str, default='transformed_data_batch_label', help='변환된 데이터가 있는 디렉토리')
-    parser.add_argument('--result_csv', type=str, default='results/results_logistic_label.csv', help='최종 결과 저장 CSV 경로')
+    parser.add_argument('--output_dir', type=str, default='transformed_data_batch_label', help='LDP 변환 데이터가 있는 루트 디렉토리')
+    parser.add_argument('--result_dir', type=str, default='results_structured', help='구조화된 결과가 저장될 루트 디렉토리')
+    parser.add_argument('--total_result_csv', type=str, default='results/results_logistic_label_summary.csv', help='(유지보수용) 통합 결과 요약 CSV 경로')
     
     # --- 모델 하이퍼파라미터 ---
     parser.add_argument('--learning_rate', type=float, default=0.05, help='경사 하강법 학습률')
@@ -248,12 +271,10 @@ if __name__ == '__main__':
     parser.add_argument('--regularization_lambda', type=float, default=0.1, help='L2 정규화 강도')
 
     # --- LDP 파라미터 ---
-    parser.add_argument('--N', type=int, default=31, help='피처 LDP 메커니즘 해상도')
+    parser.add_argument('--N', type=int, default=7, help='피처 LDP 메커니즘 해상도')
     parser.add_argument('--label_N', type=int, default=2, help='레이블 LDP 메커니즘 해상도')
 
     args = parser.parse_args()
-    
-    # 변환된 데이터가 저장된 하위 디렉토리 경로 설정
-    args.output_dir = Path(args.output_dir) / Path(args.csv_path).stem
+    #args.output_dir = Path(args.output_dir) / Path(args.csv_path).stem
     
     main(args)
