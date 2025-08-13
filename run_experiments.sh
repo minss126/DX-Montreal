@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -e # Exit immediately if a command exits with a non-zero status.
+# set -e # Exit immediately if a command exits with a non-zero status.
 
 # ─────────────────────────────────────────────
 # Unified Model Experiments
@@ -46,7 +46,7 @@ for CSV_PATH in "${LINEAR_CSV_PATHS[@]}"; do
                         python model.py \
                             --model_type "linear" \
                             --csv_path "${CSV_PATH}" \
-                            --N "${CURRENT_N}" --label_N 15 \
+                            --N "${CURRENT_N}" --label_N 7 \
                             --seeds "${COMMON_SEEDS[@]}" \
                             --eps "${EPS}" --label_eps "${EPS}" \
                             --learning_rate "${LR}" --epochs "${EPOCH}" \
@@ -55,7 +55,9 @@ for CSV_PATH in "${LINEAR_CSV_PATHS[@]}"; do
                             --transform_label_log "${TRANSFORM_LABEL_LOG_FLAG}" \
                             --output_dir "${LDP_DATA_ROOT_DIR}" \
                             --result_dir "${RESULT_ROOT_DIR}" \
-                            --total_result_dir "${RESULT_ROOT_DIR}"
+                            --total_result_dir "${RESULT_ROOT_DIR}" \
+                            --mechanism "pm" \
+                            --t 3 \
                     done
                 done
             done

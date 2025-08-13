@@ -37,7 +37,7 @@ class UnifiedExperiment:
 
         base_output_dir = Path(config.output_dir)
         dataset_name = Path(config.csv_path).stem
-        self.output_dir = base_output_dir / dataset_name
+        self.output_dir = base_output_dir / dataset_name / config.mechanism
         np.random.seed(config.seed)
 
     def _sigmoid(self, z: np.ndarray) -> np.ndarray:
@@ -166,8 +166,12 @@ class UnifiedExperiment:
             # --- 1. 데이터 로드 및 전처리 ---
             cfg = self.config
             base_filename_stem = Path(cfg.csv_path).stem
-            base_filename = (f"{base_filename_stem}_Eps{cfg.eps:.1f}_N{cfg.N}_avg_"
-                             f"Leps{cfg.label_eps:.1f}_LN{cfg.label_N}_seed{cfg.seed}")
+            if cfg.mechanism == 'qm':
+                base_filename = (f"{base_filename_stem}_Eps{cfg.eps:.1f}_N{cfg.N}_avg_"
+                                f"Leps{cfg.label_eps:.1f}_LN{cfg.label_N}_seed{cfg.seed}")
+            elif cfg.mechanism == 'pm':
+                base_filename = (f"{base_filename_stem}_Eps{cfg.eps:.1f}_t{cfg.t}_"
+                                f"Leps{cfg.label_eps:.1f}_seed{cfg.seed}")
 
             orig = pd.read_csv(cfg.csv_path)
             num_cols = orig.select_dtypes(include='number')
@@ -292,13 +296,22 @@ def main(args: argparse.Namespace):
     total_result_file.parent.mkdir(parents=True, exist_ok=True)
     total_features = get_total_features(Path(args.csv_path), args.label_col)
 
-    with open(total_result_file, 'a', newline='') as f:
-        f.write("\n" + "="*50 + "\n")
-        f.write(f"[batch: {args.batch_size} / lr: {args.learning_rate} / epochs: {args.epochs}]\n"
-                f"eps: {args.eps} / label_eps: {args.label_eps} / N: {args.N} / label_N: {args.label_N} \n")
+    if args.mechanism == 'qm':
+        with open(total_result_file, 'a', newline='') as f:
+            f.write("\n" + "="*50 + "\n")
+            f.write(f"[batch: {args.batch_size} / lr: {args.learning_rate} / epochs: {args.epochs}]\n"
+                    f"eps: {args.eps} / label_eps: {args.label_eps} / N: {args.N} / label_N: {args.label_N} \n")
 
-    exp_name = (f"eps{args.eps}_label-eps{args.label_eps}_N{args.N}_LN{args.label_N}_"
-                f"lr{args.learning_rate}_bs{args.batch_size}_ep{args.epochs}")
+        exp_name = (f"eps{args.eps}_label-eps{args.label_eps}_N{args.N}_LN{args.label_N}_"
+                    f"lr{args.learning_rate}_bs{args.batch_size}_ep{args.epochs}")
+    elif args.mechanism == 'pm':
+        with open(total_result_file, 'a', newline='') as f:
+            f.write("\n" + "="*50 + "\n")
+            f.write(f"[batch: {args.batch_size} / lr: {args.learning_rate} / epochs: {args.epochs}]\n"
+                    f"eps: {args.eps} / label_eps: {args.label_eps} / t: {args.t} \n")
+
+        exp_name = (f"eps{args.eps}_label-eps{args.label_eps}_t{args.t}_"
+                    f"lr{args.learning_rate}_bs{args.batch_size}_ep{args.epochs}")
     exp_dir = Path(args.result_dir) / Path(args.csv_path).stem / exp_name
     exp_dir.mkdir(parents=True, exist_ok=True)
 
@@ -384,6 +397,8 @@ if __name__ == '__main__':
     parser.add_argument('--batch_size', type=int, default=512, help='경사 하강법 배치 크기')
 
     # --- LDP 파라미터 (LDP Parameters) ---
+    parser.add_argument('--mechanism', help='[qm, pm, duchi, to]')
+    parser.add_argument('--t', type=int, help='LDP parameter for PM. t=2: PM, t=3: PM_sub')
     parser.add_argument('--eps', type=float, default=3.0, help='피처 epsilon 값')
     parser.add_argument('--label_eps', type=float, default=3.0, help='레이블 epsilon 값')
     parser.add_argument('--N', type=int, default=7, help='피처 LDP 메커니즘의 해상도')

@@ -9,6 +9,8 @@ from sklearn.model_selection import train_test_split
 from tqdm import tqdm
 from pathlib import Path
 
+import pm
+
 warnings.filterwarnings("ignore", category=UserWarning, module="sklearn")
 warnings.filterwarnings("ignore", category=pd.errors.PerformanceWarning)
 
@@ -91,31 +93,43 @@ class LDPMechanism:
 # 범주형 데이터용 Direct Encoding (Randomized Response) 클래스
 # ===================================================================
 class CategoricalDE:
-    def __init__(self, epsilon, num_categories):
+    """
+    고정된 카테고리 목록을 받아 차분 프라이버시를 적용하는 가장 표준적인 클래스.
+    """
+    def __init__(self, epsilon, categories):
+        # np.unique()로 추출한 실제 카테고리 목록
+        self.categories = np.asarray(categories)
+        self.k = len(self.categories)
         self.epsilon = epsilon
-        self.k = num_categories
-        exp_eps = np.exp(epsilon)
-        self.p = exp_eps / (exp_eps + self.k - 1)
-        print(f"Categorical DE 메커니즘 생성 (epsilon={epsilon:.4f}, k={self.k}, p={self.p:.4f})")
+        
+        # 내부적으로 매핑/역매핑을 위한 딕셔너리를 자동 생성
+        self.label_map = {label: i for i, label in enumerate(self.categories)}
+        self.inverse_map = {i: label for i, label in enumerate(self.categories)}
 
-    def perturb_batch(self, true_indices):
-        true_indices = np.asarray(true_indices)
-        valid_mask = ~np.isnan(true_indices)
-        if not np.any(valid_mask): return true_indices
+        # p 값은 k가 고정되므로 한 번만 계산되어 안정적임
+        exp_eps = np.exp(self.epsilon)
+        self.p = exp_eps / (exp_eps + self.k - 1)
+
+    def perturb_batch(self, true_labels):
+        original_labels = np.asarray(true_labels)
         
-        valid_indices = true_indices[valid_mask].astype(int)
-        perturbed_valid_indices = np.copy(valid_indices)
+        # 1. 레이블 -> 0-인덱스로 매핑
+        # self.categories에 없는 값은 안전하게 처리되지 않으므로, 입력 데이터는 항상 
+        # self.categories 내에 있는 값이라고 가정함.
+        mapped_indices = np.array([self.label_map[label] for label in original_labels.flatten()])
         
-        n_samples = len(valid_indices)
-        change_mask = np.random.rand(n_samples) > self.p
+        # 2. 노이즈 추가
+        change_mask = np.random.rand(len(mapped_indices)) > self.p
         n_to_change = np.sum(change_mask)
-        if n_to_change > 0:
-            random_choices = np.random.randint(0, self.k, size=n_to_change)
-            perturbed_valid_indices[change_mask] = random_choices
-            
-        final_perturbed_indices = np.full(len(true_indices), np.nan)
-        final_perturbed_indices[valid_mask] = perturbed_valid_indices
-        return final_perturbed_indices
+        random_indices = np.random.randint(0, self.k, size=n_to_change)
+        
+        perturbed_indices = np.copy(mapped_indices)
+        perturbed_indices[change_mask] = random_indices
+        
+        # 3. 0-인덱스 -> 원래 레이블로 역매핑
+        final_labels = np.array([self.inverse_map[idx] for idx in perturbed_indices])
+        
+        return final_labels.reshape(original_labels.shape)
 
 # ===================================================================
 # 메커니즘 로딩/생성 헬퍼 함수
@@ -142,7 +156,6 @@ class DatasetTransformer:
     def __init__(self, args):
         self.args = args
         raw_df = pd.read_csv(args.csv_path)
-        print(raw_df.columns)
         if args.label_col not in raw_df.columns:
             raise ValueError(f"지정한 레이블 칼럼 '{args.label_col}'이 데이터셋에 없습니다.")
         if self.args.transform_label_log:
@@ -175,9 +188,10 @@ class DatasetTransformer:
         self.scalers = {}
         self.feature_mechanism_numerical = None
         self.label_mechanism_numerical = None
+        self.label_mechanism_categorical = None
         
-        self.ldp_index_min = None
-        self.ldp_index_max = None
+        self.ldp_val_min = None
+        self.ldp_val_max = None
         self.original_label_min = None
         self.original_label_max = None
         
@@ -192,26 +206,27 @@ class DatasetTransformer:
         for col in self.numeric_cols:
             self.scalers[col] = MinMaxScaler(feature_range=(-1, 1)).fit(self.train_df[[col]])
         
-        # 수치형 레이블 변환 준비
-        if self.args.transform_label_numerical:
+        if self.args.transform_label_numerical:            
             label_eps = self.args.label_epsilon if self.args.label_epsilon is not None else self.args.eps
-            label_n = self.args.label_N if self.args.label_N is not None else self.args.N
-            
-            print(f"[Info] 수치형 레이블 변환을 위해 LDP 메커니즘과 역변환 파라미터를 준비합니다 (epsilon={label_eps:.4f}, N={label_n}).")
+            print(f"[Info] 수치형 레이블 변환을 위해 LDP 메커니즘과 역변환 파라미터를 준비합니다,.")
             
             # 1. LDP 입력용 스케일러 ([-1, 1]로 변환)
             self.scalers[self.args.label_col] = MinMaxScaler(feature_range=(-1, 1)).fit(self.train_df[[self.args.label_col]])
-            self.label_mechanism_numerical = load_or_create_mechanism(self.args.obj, label_eps, label_n, usage="레이블")
-
+            self.label_mechanism_numerical = pm.PM(label_eps, t=self.args.t)
+            
             # 2. ✨ [핵심] 역변환(선형 보간)에 사용할 min/max 값 저장
-            self.ldp_index_min = self.label_mechanism_numerical.a_indices.min()
-            self.ldp_index_max = self.label_mechanism_numerical.a_indices.max()
+            self.ldp_val_min = -self.label_mechanism_numerical.A
+            self.ldp_val_max = self.label_mechanism_numerical.A
             self.original_label_min = self.train_df[self.args.label_col].min()
             self.original_label_max = self.train_df[self.args.label_col].max()
 
             print(f"[Info] 역변환 파라미터 설정:")
-            print(f"  - LDP 인덱스 범위: [{self.ldp_index_min}, {self.ldp_index_max}]")
+            print(f"  - LDP 인덱스 범위: [{self.ldp_val_min}, {self.ldp_val_max}]")
             print(f"  - 원본 레이블 범위: [{self.original_label_min}, {self.original_label_max}]")
+
+        elif self.args.transform_label_categorical:
+            label_eps = self.args.label_epsilon if self.args.label_epsilon is not None else self.args.eps
+            self.label_mechanism_categorical = CategoricalDE(label_eps, np.unique(self.train_df[[self.args.label_col]]))
 
     def _transform_train_batch(self):
         print("\nTrain 데이터셋 변환 중 (Stochastic & Batch)...")
@@ -222,10 +237,10 @@ class DatasetTransformer:
         if self.numeric_cols:
             print(f"  - {len(self.numeric_cols)}개의 수치형 피처 변환...")
             if not self.feature_mechanism_numerical:
-                self.feature_mechanism_numerical = load_or_create_mechanism(self.args.obj, self.args.eps, self.args.N, usage="피처")
+                self.feature_mechanism_numerical = pm.PM(self.args.eps, t=self.args.t)
             scaled_data = np.array([self.scalers[col].transform(self.train_df[[col]]).flatten() for col in self.numeric_cols]).T
-            perturbed_indices = self.feature_mechanism_numerical.perturb_batch_to_indices(scaled_data.flatten()).reshape(num_sam, -1)
-            feature_df = pd.DataFrame(perturbed_indices, index=self.train_df.index, columns=self.numeric_cols)
+            perturbed_vals = self.feature_mechanism_numerical.PM_batch(scaled_data.flatten()).reshape(num_sam, -1)
+            feature_df = pd.DataFrame(perturbed_vals, index=self.train_df.index, columns=self.numeric_cols)
             final_df = pd.concat([final_df, feature_df], axis=1)
 
         # --- 레이블 변환 ---
@@ -234,22 +249,22 @@ class DatasetTransformer:
             
             # 1. 원본 -> LDP 인덱스
             scaled_label = self.scalers[self.args.label_col].transform(self.train_df[[self.args.label_col]]).flatten()
-            perturbed_indices = self.label_mechanism_numerical.perturb_batch_to_indices(scaled_label)
+            perturbed_vals = self.label_mechanism_numerical.PM_batch(scaled_label)
             
             # 2. ✨ [새로운 역변환] LDP 인덱스 -> 원본 범위로 선형 보간
-            idx_min, idx_max = self.ldp_index_min, self.ldp_index_max
+            pm_min, pm_max = self.ldp_val_min, self.ldp_val_max
             val_min, val_max = self.original_label_min, self.original_label_max
 
-            # 분모가 0이 되는 경우 방지
-            if idx_max == idx_min:
-                inversed_values = np.full_like(perturbed_indices, val_min, dtype=float)
-            else:
                 # 선형 보간 공식
-                normalized_pos = (perturbed_indices - idx_min) / (idx_max - idx_min)
-                inversed_values = normalized_pos * (val_max - val_min) + val_min
+            normalized_pos = (perturbed_vals - pm_min) / (pm_max - pm_min)
+            inversed_values = normalized_pos * (val_max - val_min) + val_min
             
             final_df[self.args.label_col] = inversed_values
             print_debug_info(self.train_df, final_df, self.args.label_col)
+        elif self.args.transform_label_categorical:
+            perturbed_indices = self.label_mechanism_categorical.perturb_batch(self.train_df[[self.args.label_col]])
+            final_df[self.args.label_col] = perturbed_indices
+        
         else:
             print(f"  - ⚠️ 레이블 변환 플래그가 설정되지 않아 원본 값을 사용합니다.")
             final_df[self.args.label_col] = self.train_df[self.args.label_col].values
@@ -263,12 +278,12 @@ class DatasetTransformer:
         
         if self.numeric_cols:
             print(f"  - {len(self.numeric_cols)}개의 수치형 피처 변환...")
-            if not self.feature_mechanism_numerical: self.feature_mechanism_numerical = load_or_create_mechanism(self.args.obj, self.args.eps, self.args.N, usage="피처")
+            if not self.feature_mechanism_numerical: self.feature_mechanism_numerical = pm.PM(self.args.eps, t=self.args.t)
             
             perturbed_data = np.zeros((len(self.test_df), len(self.numeric_cols)))
             for i, col in enumerate(self.numeric_cols):
                 scaled_vals = self.scalers[col].transform(self.test_df[[col]])
-                perturbed_vals = [self.feature_mechanism_numerical.perturb_to_index_deterministic(val) for val in tqdm(scaled_vals.flatten(), desc=f'  -> Det. Perturbing {col}', leave=False)]
+                perturbed_vals = [self.feature_mechanism_numerical.PM_batch_deterministic(val) for val in tqdm(scaled_vals.flatten(), desc=f'  -> Det. Perturbing {col}', leave=False)]
                 perturbed_data[:, i] = perturbed_vals
             transformed_features.append(pd.DataFrame(perturbed_data, index=self.test_df.index, columns=self.numeric_cols))
             
@@ -297,19 +312,14 @@ class DatasetTransformer:
         if not os.path.exists(output_dir): os.makedirs(output_dir)
         base_filename = os.path.splitext(os.path.basename(self.args.csv_path))[0]
         cat_suffix = "_withCat" if self.args.with_categorical else ""
-        
+
         label_eps_suffix = ""
         if (self.args.transform_label_numerical or self.args.transform_label_categorical):
              label_eps = self.args.label_epsilon if self.args.label_epsilon is not None else self.args.eps
              label_eps_suffix = f"_Leps{label_eps}"
-        
-        label_n_suffix = ""
-        if self.args.transform_label_numerical:
-            label_n = self.args.label_N if self.args.label_N is not None else self.args.N
-            label_n_suffix = f"_LN{label_n}"
 
         ## 파일 이름에 seed 값 추가
-        output_csv_filename = f"{base_filename}_Eps{self.args.eps}_N{self.args.N}_{self.args.obj}{cat_suffix}{label_eps_suffix}{label_n_suffix}_seed{self.args.seed}{file_suffix}.csv"
+        output_csv_filename = f"{base_filename}_Eps{self.args.eps}_t{self.args.t}{label_eps_suffix}_seed{self.args.seed}{file_suffix}.csv"
         output_csv_path = os.path.join(output_dir, output_csv_filename)
         df.to_csv(output_csv_path, index=True)
         print(f"'{output_csv_path}'에 저장되었습니다.")
@@ -320,26 +330,6 @@ def print_debug_info(train_df, final_df, label_col):
     print(f"    - 원본: {train_df[label_col].values[:5]}")
     print(f"    - 변환: {final_df[label_col].values[:5]}")
 
-
-# python transform_train_test_batch_label.py --eps 1.0 --transform_label_numerical True --transform_label_categorical False --transform_label_log True --csv_path data/Beijing_housing.csv --label_col label
-# python transform_train_test_batch_label.py --eps 2.0 --transform_label_numerical True --transform_label_categorical False --transform_label_log True --csv_path data/Beijing_housing.csv --label_col label
-# python transform_train_test_batch_label.py --eps 3.0 --transform_label_numerical True --transform_label_categorical False --transform_label_log True --csv_path data/Beijing_housing.csv --label_col label
-# python transform_train_test_batch_label.py --eps 4.0 --transform_label_numerical True --transform_label_categorical False --transform_label_log True --csv_path data/Beijing_housing.csv --label_col label
-# python transform_train_test_batch_label.py --eps 5.0 --transform_label_numerical True --transform_label_categorical False --transform_label_log True --csv_path data/Beijing_housing.csv --label_col label
-
-# python transform_train_test_batch_label.py --eps 1.0 --transform_label_numerical True --transform_label_categorical False --transform_label_log True --csv_path data/OnlineNewsPopularity_nocat.csv --label_col shares --N 2 --label_N 2
-# python transform_train_test_batch_label.py --eps 2.0 --transform_label_numerical True --transform_label_categorical False --transform_label_log True --csv_path data/OnlineNewsPopularity_nocat.csv --label_col shares --N 2 --label_N 2
-# python transform_train_test_batch_label.py --eps 3.0 --transform_label_numerical True --transform_label_categorical False --transform_label_log True --csv_path data/OnlineNewsPopularity_nocat.csv --label_col shares --N 2 --label_N 2
-# python transform_train_test_batch_label.py --eps 4.0 --transform_label_numerical True --transform_label_categorical False --transform_label_log True --csv_path data/OnlineNewsPopularity_nocat.csv --label_col shares --N 2 --label_N 2
-# python transform_train_test_batch_label.py --eps 5.0 --transform_label_numerical True --transform_label_categorical False --transform_label_log True --csv_path data/OnlineNewsPopularity_nocat.csv --label_col shares --N 2 --label_N 2
-
-
-# python transform_train_test_batch_label.py --eps 1.0 --transform_label_numerical True --transform_label_categorical False --transform_label_log False --csv_path data/wine.csv --label_col label --N 2 --label_N 2
-# python transform_train_test_batch_label.py --eps 2.0 --transform_label_numerical True --transform_label_categorical False --transform_label_log False --csv_path data/wine.csv --label_col label --N 2 --label_N 2
-# python transform_train_test_batch_label.py --eps 3.0 --transform_label_numerical True --transform_label_categorical False --transform_label_log False --csv_path data/wine.csv --label_col label --N 2 --label_N 2
-# python transform_train_test_batch_label.py --eps 4.0 --transform_label_numerical True --transform_label_categorical False --transform_label_log False --csv_path data/wine.csv --label_col label --N 2 --label_N 2
-# python transform_train_test_batch_label.py --eps 5.0 --transform_label_numerical True --transform_label_categorical False --transform_label_log False --csv_path data/wine.csv --label_col label --N 2 --label_N 2
-
 # ===================================================================
 # 메인 실행 블록
 # ===================================================================
@@ -349,6 +339,28 @@ def str2bool(v):
     elif v.lower() in ('no', 'false', 'f', 'n', '0'): return False
     else: raise argparse.ArgumentTypeError('Boolean value expected.')
 
+# python pm_transform_train_test_batch_label.py --eps 3.0 --transform_label_numerical False --transform_label_categorical True --transform_label_log False --csv_path data/wine.csv --mode uniform
+# python pm_transform_train_test_batch_label.py --eps 3.0 --transform_label_numerical True --transform_label_categorical False --transform_label_log False --mode midpoint
+
+# python pm_transform_train_test_batch_label.py --eps 1.0 --transform_label_numerical False --transform_label_categorical True --transform_label_log False --csv_path data/shuttle.csv --label_col label
+
+# python pm_transform_train_test_batch_label.py --eps 1.0 --transform_label_numerical False --transform_label_categorical True --transform_label_log False --csv_path data/gamma.csv --label_col label
+# python pm_transform_train_test_batch_label.py --eps 2.0 --transform_label_numerical False --transform_label_categorical True --transform_label_log False --csv_path data/gamma.csv --label_col label
+# python pm_transform_train_test_batch_label.py --eps 3.0 --transform_label_numerical False --transform_label_categorical True --transform_label_log False --csv_path data/gamma.csv --label_col label
+# python pm_transform_train_test_batch_label.py --eps 4.0 --transform_label_numerical False --transform_label_categorical True --transform_label_log False --csv_path data/gamma.csv --label_col label
+# python pm_transform_train_test_batch_label.py --eps 5.0 --transform_label_numerical False --transform_label_categorical True --transform_label_log False --csv_path data/gamma.csv --label_col label
+# python pm_transform_train_test_batch_label.py --eps 1.0 --transform_label_numerical False --transform_label_categorical True --transform_label_log False --csv_path data/credit.csv --label_col label --t 2 
+# python pm_transform_train_test_batch_label.py --eps 2.0 --transform_label_numerical False --transform_label_categorical True --transform_label_log False --csv_path data/credit.csv --label_col label --t 2 
+# python pm_transform_train_test_batch_label.py --eps 3.0 --transform_label_numerical False --transform_label_categorical True --transform_label_log False --csv_path data/credit.csv --label_col label --t 2 
+# python pm_transform_train_test_batch_label.py --eps 4.0 --transform_label_numerical False --transform_label_categorical True --transform_label_log False --csv_path data/credit.csv --label_col label --t 2 
+# python pm_transform_train_test_batch_label.py --eps 5.0 --transform_label_numerical False --transform_label_categorical True --transform_label_log False --csv_path data/credit.csv --label_col label --t 2 
+
+# python pm_transform_train_test_batch_label.py --eps 1.0 --transform_label_numerical True --transform_label_categorical False --transform_label_log False --csv_path data/CASP.csv --label_col RMSD
+# python pm_transform_train_test_batch_label.py --eps 2.0 --transform_label_numerical True --transform_label_categorical False --transform_label_log False --csv_path data/CASP.csv --label_col RMSD
+# python pm_transform_train_test_batch_label.py --eps 3.0 --transform_label_numerical True --transform_label_categorical False --transform_label_log False --csv_path data/CASP.csv --label_col RMSD
+# python pm_transform_train_test_batch_label.py --eps 4.0 --transform_label_numerical True --transform_label_categorical False --transform_label_log False --csv_path data/CASP.csv --label_col RMSD
+# python pm_transform_train_test_batch_label.py --eps 5.0 --transform_label_numerical True --transform_label_categorical False --transform_label_log False --csv_path data/CASP.csv --label_col RMSD
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(
         description="LDP 메커니즘으로 CSV 데이터셋을 배치 변환합니다."
@@ -356,11 +368,9 @@ if __name__ == '__main__':
     
     # 기존 인자 (일부 생략 없이 그대로 유지)
     parser.add_argument('--eps', type=float, default=5.0)
-    parser.add_argument('--N', type=int, default=7)
-    parser.add_argument('--label_N', type=int, default=7)
     parser.add_argument('--label_epsilon', type=float, default=None)
-    parser.add_argument('--obj', type=str, default='avg', choices=['avg', 'worst'])
-    parser.add_argument('--csv_path', type=str, default='data/Beijing_housing.csv')
+    parser.add_argument('--t', type=int, default=3)
+    parser.add_argument('--csv_path', type=str, default='data/elevators.csv')
     parser.add_argument('--label_col', type=str, default='label')
     parser.add_argument('--output_dir', type=str, default='transformed_data_batch_label')
     parser.add_argument('--with_categorical', type=str2bool, default=False)
@@ -379,7 +389,7 @@ if __name__ == '__main__':
     seeds_to_run = args.seeds
 
     dataset_name = Path(args.csv_path).stem
-    args.output_dir = Path(args.output_dir) / dataset_name / 'qm'
+    args.output_dir = Path(args.output_dir) / dataset_name / 'pm'
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
     for current_seed in seeds_to_run:
