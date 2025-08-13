@@ -15,81 +15,6 @@ warnings.filterwarnings("ignore", category=UserWarning, module="sklearn")
 warnings.filterwarnings("ignore", category=pd.errors.PerformanceWarning)
 
 # ===================================================================
-# LDP 메커니즘 로더 클래스 (Numerical)
-# ===================================================================
-class LDPMechanism:
-    def __init__(self, pkl_path):
-        if not os.path.exists(pkl_path):
-            raise FileNotFoundError(f"지정된 경로에 pkl 파일이 없습니다: {pkl_path}")
-        with open(pkl_path, 'rb') as f:
-            data = pickle.load(f)
-
-        self.a_values = data['a_values']
-        self.p_matrix = data['p_matrix']
-        self.metadata = data['metadata']
-        self.n_param = self.metadata['n_param']
-        self.epsilon = self.metadata['epsilon']
-        self.N = self.metadata['N_total_a_points']
-        
-        self.x_values = self.a_values @ self.p_matrix
-        if not np.all(np.diff(self.x_values) >= -1e-9):
-            print("[Warning] x_values가 단조 증가하지 않아 정렬합니다.")
-            sort_indices = np.argsort(self.x_values)
-            self.x_values = self.x_values[sort_indices]
-            self.p_matrix = self.p_matrix[:, sort_indices]
-
-        if self.metadata['use_a0']:
-            self.a_indices = np.arange(-self.n_param, self.n_param + 1)
-        else:
-            self.a_indices = np.concatenate([np.arange(-self.n_param, 0), np.arange(1, self.n_param + 1)])
-        
-        # ✨ 역변환을 위한 인덱스-값 맵
-        self.a_index_to_value_map = {idx: val for idx, val in zip(self.a_indices, self.a_values)}
-            
-        print(f"Numerical LDP 메커니즘 로드 완료 (epsilon={self.epsilon}, N={self.N}).")
-    
-    def map_indices_to_values(self, indices):
-        """ ✨ [역변환용] LDP 메커니즘이 출력한 정수 인덱스를 [-1, 1] 범위의 값으로 변환합니다. """
-        return np.vectorize(self.a_index_to_value_map.get)(indices)
-
-    def get_prob_vectors_batch(self, x_scaled_batch):
-        x_scaled_batch = np.asarray(x_scaled_batch)
-        signs = np.sign(x_scaled_batch)
-        x_abs_batch = np.abs(x_scaled_batch)
-        x_clipped_batch = np.clip(x_abs_batch, self.x_values[0], self.x_values[-1])
-        j_batch = np.searchsorted(self.x_values, x_clipped_batch, side='left')
-        j_batch[j_batch == 0] = 1
-        j_batch[j_batch >= len(self.x_values)] = len(self.x_values) - 1
-        x_j_batch = self.x_values[j_batch]
-        x_jm1_batch = self.x_values[j_batch - 1]
-        p_j_batch = self.p_matrix[:, j_batch]
-        p_jm1_batch = self.p_matrix[:, j_batch - 1]
-        dx_batch = x_j_batch - x_jm1_batch
-        dx_batch[np.abs(dx_batch) < 1e-9] = 1.0 
-        slope_batch = (p_j_batch - p_jm1_batch) / dx_batch
-        prob_vectors = slope_batch * (x_clipped_batch - x_j_batch) + p_j_batch
-        prob_vectors[prob_vectors < 0] = 0
-        prob_sums = np.sum(prob_vectors, axis=0)
-        prob_sums[prob_sums < 1e-9] = 1.0
-        prob_vectors /= prob_sums
-        neg_indices = np.where(signs < 0)[0]
-        if len(neg_indices) > 0:
-            prob_vectors[:, neg_indices] = prob_vectors[::-1, neg_indices]
-        return prob_vectors
-
-    def perturb_batch_to_indices(self, x_scaled_batch):
-        prob_vectors = self.get_prob_vectors_batch(x_scaled_batch)
-        cumulative_probs = np.cumsum(prob_vectors.T, axis=1)
-        random_values = np.random.rand(len(x_scaled_batch), 1)
-        internal_indices = (random_values < cumulative_probs).argmax(axis=1)
-        return self.a_indices[internal_indices]
-
-    def perturb_to_index_deterministic(self, x_scaled):
-        prob_vector = self.get_prob_vectors_batch(np.array([x_scaled])).flatten()
-        best_internal_idx = np.argmax(prob_vector)
-        return self.a_indices[best_internal_idx]
-
-# ===================================================================
 # 범주형 데이터용 Direct Encoding (Randomized Response) 클래스
 # ===================================================================
 class CategoricalDE:
@@ -130,24 +55,6 @@ class CategoricalDE:
         final_labels = np.array([self.inverse_map[idx] for idx in perturbed_indices])
         
         return final_labels.reshape(original_labels.shape)
-
-# ===================================================================
-# 메커니즘 로딩/생성 헬퍼 함수
-# ===================================================================
-def load_or_create_mechanism(obj_type, epsilon, N, usage="피처"):
-    print(f"{usage}용 Numerical 메커니즘 준비 중 (Objective: {obj_type}, Epsilon: {epsilon:.4f}, N: {N})...")
-    dir_path = 'results_a1_optimized' if obj_type == 'avg' else 'results_worst_case'
-    pkl_path = os.path.join(dir_path, f'opt_results_{"worst_case_" if obj_type == "worst" else ""}eps{epsilon:.4f}_N{N}.pkl')
-    if not os.path.exists(dir_path): os.makedirs(dir_path)
-    try:
-        mechanism = LDPMechanism(pkl_path)
-    except FileNotFoundError:
-        print(f"-> '{pkl_path}' 파일 없음. 최적화 스크립트를 실행합니다.")
-        if obj_type == 'avg': make_mechanism_avg.optimize(epsilon, N)
-        else: make_mechanism_worst.optimize(epsilon, N)
-        mechanism = LDPMechanism(pkl_path)
-    print(f"-> {usage}용 Numerical 메커니즘 준비 완료.")
-    return mechanism
 
 # ===================================================================
 # 데이터셋 변환을 담당하는 클래스
