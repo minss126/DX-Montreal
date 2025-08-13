@@ -218,7 +218,7 @@ class UnifiedExperiment:
                 pred_orig = X_orig_test @ beta_orig
                 pred_ldp = X_ldp_test @ beta_ldp
                 if cfg.transform_label_log:
-                    y_orig_test = np.expm1(y_orig_test)
+                    y_orig_test, y_ldp_test = np.expm1(y_orig_test), np.expm1(y_ldp_test)
                     pred_orig, pred_ldp = np.expm1(pred_orig), np.expm1(pred_ldp)
                 
                 metrics_orig = {
@@ -405,4 +405,5 @@ if __name__ == '__main__':
     parser.add_argument('--label_N', type=int, default=2, help='레이블 LDP 메커니즘의 해상도')
 
     args = parser.parse_args()
+
     main(args)
