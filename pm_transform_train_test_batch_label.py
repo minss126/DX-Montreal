@@ -246,27 +246,11 @@ def str2bool(v):
     elif v.lower() in ('no', 'false', 'f', 'n', '0'): return False
     else: raise argparse.ArgumentTypeError('Boolean value expected.')
 
-# python pm_transform_train_test_batch_label.py --eps 3.0 --transform_label_numerical False --transform_label_categorical True --transform_label_log False --csv_path data/wine.csv --mode uniform
-# python pm_transform_train_test_batch_label.py --eps 3.0 --transform_label_numerical True --transform_label_categorical False --transform_label_log False --mode midpoint
-
-# python pm_transform_train_test_batch_label.py --eps 1.0 --transform_label_numerical False --transform_label_categorical True --transform_label_log False --csv_path data/shuttle.csv --label_col label
-
-# python pm_transform_train_test_batch_label.py --eps 1.0 --transform_label_numerical False --transform_label_categorical True --transform_label_log False --csv_path data/gamma.csv --label_col label
-# python pm_transform_train_test_batch_label.py --eps 2.0 --transform_label_numerical False --transform_label_categorical True --transform_label_log False --csv_path data/gamma.csv --label_col label
-# python pm_transform_train_test_batch_label.py --eps 3.0 --transform_label_numerical False --transform_label_categorical True --transform_label_log False --csv_path data/gamma.csv --label_col label
-# python pm_transform_train_test_batch_label.py --eps 4.0 --transform_label_numerical False --transform_label_categorical True --transform_label_log False --csv_path data/gamma.csv --label_col label
-# python pm_transform_train_test_batch_label.py --eps 5.0 --transform_label_numerical False --transform_label_categorical True --transform_label_log False --csv_path data/gamma.csv --label_col label
-# python pm_transform_train_test_batch_label.py --eps 1.0 --transform_label_numerical False --transform_label_categorical True --transform_label_log False --csv_path data/credit.csv --label_col label --t 2 
-# python pm_transform_train_test_batch_label.py --eps 2.0 --transform_label_numerical False --transform_label_categorical True --transform_label_log False --csv_path data/credit.csv --label_col label --t 2 
-# python pm_transform_train_test_batch_label.py --eps 3.0 --transform_label_numerical False --transform_label_categorical True --transform_label_log False --csv_path data/credit.csv --label_col label --t 2 
-# python pm_transform_train_test_batch_label.py --eps 4.0 --transform_label_numerical False --transform_label_categorical True --transform_label_log False --csv_path data/credit.csv --label_col label --t 2 
-# python pm_transform_train_test_batch_label.py --eps 5.0 --transform_label_numerical False --transform_label_categorical True --transform_label_log False --csv_path data/credit.csv --label_col label --t 2 
-
-# python pm_transform_train_test_batch_label.py --eps 1.0 --transform_label_numerical True --transform_label_categorical False --transform_label_log False --csv_path data/CASP.csv --label_col RMSD
-# python pm_transform_train_test_batch_label.py --eps 2.0 --transform_label_numerical True --transform_label_categorical False --transform_label_log False --csv_path data/CASP.csv --label_col RMSD
-# python pm_transform_train_test_batch_label.py --eps 3.0 --transform_label_numerical True --transform_label_categorical False --transform_label_log False --csv_path data/CASP.csv --label_col RMSD
-# python pm_transform_train_test_batch_label.py --eps 4.0 --transform_label_numerical True --transform_label_categorical False --transform_label_log False --csv_path data/CASP.csv --label_col RMSD
-# python pm_transform_train_test_batch_label.py --eps 5.0 --transform_label_numerical True --transform_label_categorical False --transform_label_log False --csv_path data/CASP.csv --label_col RMSD
+# python pm_transform_train_test_batch_label.py --eps 1.0 --transform_label_numerical True --transform_label_categorical False --transform_label_log False --csv_path data/CASP.csv --label_col RMSD --t 2
+# python pm_transform_train_test_batch_label.py --eps 2.0 --transform_label_numerical True --transform_label_categorical False --transform_label_log False --csv_path data/CASP.csv --label_col RMSD --t 2
+# python pm_transform_train_test_batch_label.py --eps 3.0 --transform_label_numerical True --transform_label_categorical False --transform_label_log False --csv_path data/CASP.csv --label_col RMSD --t 2
+# python pm_transform_train_test_batch_label.py --eps 4.0 --transform_label_numerical True --transform_label_categorical False --transform_label_log False --csv_path data/CASP.csv --label_col RMSD --t 2
+# python pm_transform_train_test_batch_label.py --eps 5.0 --transform_label_numerical True --transform_label_categorical False --transform_label_log False --csv_path data/CASP.csv --label_col RMSD --t 2
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(
@@ -275,6 +259,8 @@ if __name__ == '__main__':
     
     # 기존 인자 (일부 생략 없이 그대로 유지)
     parser.add_argument('--eps', type=float, default=5.0)
+    parser.add_argument('--N', type=float)
+    parser.add_argument('--label_N', type=float)
     parser.add_argument('--label_epsilon', type=float, default=None)
     parser.add_argument('--t', type=int, default=3)
     parser.add_argument('--csv_path', type=str, default='data/elevators.csv')
