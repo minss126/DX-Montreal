@@ -29,7 +29,7 @@ OUTPUT_DIR="transformed_data_batch_label"
 # 값 리스트
 EPS_VALUES="1.0 2.0 3.0 4.0 5.0"
 #LABEL_EPS_VALUES="2.0 4.0"
-N_VALUES="2 3 7"
+N_VALUES="7"
 
 for DATASET in "${DATASETS[@]}"; do
   CSV_PATH="data/${DATASET}.csv"
