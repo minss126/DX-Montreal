@@ -34,10 +34,6 @@ class UnifiedExperiment:
 
     def __init__(self, config: argparse.Namespace):
         self.config = config
-
-        base_output_dir = Path(config.output_dir)
-        dataset_name = Path(config.csv_path).stem
-        self.output_dir = base_output_dir / dataset_name / config.mechanism
         np.random.seed(config.seed)
 
     def _sigmoid(self, z: np.ndarray) -> np.ndarray:
@@ -161,115 +157,224 @@ class UnifiedExperiment:
         youden_j = tpr - fpr
         return thresholds[np.argmax(youden_j)]
 
+# UnifiedExperiment 클래스 내부의 run 함수
     def run(self) -> pd.DataFrame:
         try:
-            # --- 1. 데이터 로드 및 전처리 ---
             cfg = self.config
-            base_filename_stem = Path(cfg.csv_path).stem
-            if cfg.mechanism == 'qm':
-                base_filename = (f"{base_filename_stem}_Eps{cfg.eps:.1f}_N{cfg.N}_avg_"
-                                f"Leps{cfg.label_eps:.1f}_LN{cfg.label_N}_seed{cfg.seed}")
-            elif cfg.mechanism == 'pm':
-                base_filename = (f"{base_filename_stem}_Eps{cfg.eps:.1f}_t{cfg.t}_"
-                                f"Leps{cfg.label_eps:.1f}_seed{cfg.seed}")
-
+            # --- 1. 데이터 로드 및 분할 ---
             orig = pd.read_csv(cfg.csv_path)
             num_cols = orig.select_dtypes(include='number')
             drop_cols = num_cols.columns[num_cols.isna().mean() > 0.4]
             orig_full = orig.drop(columns=drop_cols).select_dtypes(include='number')
-
-            train_ldp = pd.read_csv(self.output_dir / f"{base_filename}_train.csv", index_col=0).select_dtypes(include='number')
-            test_ldp = pd.read_csv(self.output_dir / f"{base_filename}_test.csv", index_col=0).select_dtypes(include='number')
             
-            train_orig = orig_full.loc[train_ldp.index].reset_index(drop=True)
-            test_orig = orig_full.loc[test_ldp.index].reset_index(drop=True)
+            # LDP 데이터 중 하나를 기준으로 train/test 인덱스를 가져옴
+            # (어떤 메커니즘이든 인덱스는 동일해야 함)
+            first_mechanism_key = cfg.mechanisms[0]
+            if first_mechanism_key.startswith('pm'):
+                mechanism_name = 'pm'
+                t_val = int(first_mechanism_key.split('_t')[-1])
+                base_filename = f"{Path(cfg.csv_path).stem}_Eps{cfg.eps:.1f}_t{t_val}_Leps{cfg.label_eps:.1f}_seed{cfg.seed}"
+            else: # qm
+                mechanism_name = 'qm'
+                base_filename = f"{Path(cfg.csv_path).stem}_Eps{cfg.eps:.1f}_N{cfg.N}_{cfg.obj}_Leps{cfg.label_eps:.1f}_LN{cfg.label_N}_seed{cfg.seed}"
+            
+            output_dir = Path(cfg.output_dir) / Path(cfg.csv_path).stem / mechanism_name
+            train_indices = pd.read_csv(output_dir / f"{base_filename}_train.csv", index_col=0).index
+            test_indices = pd.read_csv(output_dir / f"{base_filename}_test.csv", index_col=0).index
 
-            feats = [c for c in train_ldp.columns if c != cfg.label_col]
+            train_orig = orig_full.loc[train_indices].reset_index(drop=True)
+            test_orig = orig_full.loc[test_indices].reset_index(drop=True)
+
+            # --- 2. 원본(Original) 데이터 전처리 및 모델 학습 ---
+            logging.info("--- Processing Original Data ---")
+            feats = [c for c in train_orig.columns if c != cfg.label_col]
             train_orig_imp, test_orig_imp = self._impute(train_orig, test_orig)
-            train_ldp_imp, test_ldp_imp = self._impute(train_ldp, test_ldp)
             train_orig_scaled, test_orig_scaled = self._scale(train_orig_imp[feats], test_orig_imp[feats])
-            train_ldp_scaled, test_ldp_scaled = self._scale(train_ldp_imp[feats], test_ldp_imp[feats])
-
             add_bias = lambda X: np.hstack([np.ones((X.shape[0], 1)), X])
             X_orig_train, X_orig_test = add_bias(train_orig_scaled.values), add_bias(test_orig_scaled.values)
-            X_ldp_train, X_ldp_test = add_bias(train_ldp_scaled.values), add_bias(test_ldp_scaled.values)
             y_orig_train, y_orig_test = train_orig_imp[cfg.label_col].values, test_orig_imp[cfg.label_col].values
-            y_ldp_train, y_ldp_test = train_ldp_imp[cfg.label_col].values, test_ldp_imp[cfg.label_col].values
 
-            # 모델별 레이블 전처리
+            # --- ★ 모델별 원본 레이블 전처리 (여기에 위치) ★ ---
             if cfg.model_type == 'linear' and cfg.transform_label_log:
                 y_orig_train, y_orig_test = np.log1p(y_orig_train), np.log1p(y_orig_test)
             elif cfg.model_type == 'logistic_multi':
                 oe = OrdinalEncoder(handle_unknown='use_encoded_value', unknown_value=-1, dtype=int)
-                y_orig_train = oe.fit_transform(y_orig_train.reshape(-1,1)).ravel()
-                y_orig_test = oe.transform(y_orig_test.reshape(-1,1)).ravel()
-                
-                oe_ldp = OrdinalEncoder(handle_unknown='use_encoded_value', unknown_value=-1, dtype=int)
-                y_ldp_train = oe_ldp.fit_transform(y_ldp_train.reshape(-1,1)).ravel()
-                y_ldp_test = oe_ldp.transform(y_ldp_test.reshape(-1,1)).ravel()
+                y_orig_train = oe.fit_transform(y_orig_train.reshape(-1, 1)).ravel()
+                y_orig_test = oe.transform(y_orig_test.reshape(-1, 1)).ravel()
 
-            # --- 2. 모델 학습 ---
             beta_orig = self._train_gd(X_orig_train, y_orig_train)
-            beta_ldp = self._train_gd(X_ldp_train, y_ldp_train)
-
-            # --- 3. 예측 및 평가 ---
-            data = {}
-            if cfg.model_type == 'linear':
-                pred_orig = X_orig_test @ beta_orig
-                pred_ldp = X_ldp_test @ beta_ldp
-                if cfg.transform_label_log:
-                    y_orig_test, y_ldp_test = np.expm1(y_orig_test), np.expm1(y_ldp_test)
-                    pred_orig, pred_ldp = np.expm1(pred_orig), np.expm1(pred_ldp)
+            
+            # --- 3. LDP 메커니즘 순회 처리 ---
+            ldp_results_to_evaluate = {}
+            for mechanism_key in cfg.mechanisms:
+                logging.info(f"--- Processing LDP mechanism: {mechanism_key} ---")
                 
-                metrics_orig = {
-                    'MSE': mean_squared_error(y_orig_test, pred_orig),
-                    'RMSE': np.sqrt(mean_squared_error(y_orig_test, pred_orig)),
-                    'MAE': mean_absolute_error(y_orig_test, pred_orig)
-                }
-                metrics_ldp = {
-                    'MSE': mean_squared_error(y_ldp_test, pred_ldp),
-                    'RMSE': np.sqrt(mean_squared_error(y_ldp_test, pred_ldp)),
-                    'MAE': mean_absolute_error(y_ldp_test, pred_ldp)
-                }
-                data['Full'] = metrics_orig
-                data['LDP'] = metrics_ldp
-                df_scores = pd.DataFrame(data).T.round(3)
+                # 메커니즘 키 파싱 및 파일명 생성
+                t_val = None
+                if mechanism_key.startswith('pm'):
+                    mechanism_name = 'pm'
+                    t_val = int(mechanism_key.split('_t')[-1])
+                    base_filename = f"{Path(cfg.csv_path).stem}_Eps{cfg.eps:.1f}_t{t_val}_Leps{cfg.label_eps:.1f}_seed{cfg.seed}"
+                else: # qm
+                    mechanism_name = 'qm'
+                    base_filename = f"{Path(cfg.csv_path).stem}_Eps{cfg.eps:.1f}_N{cfg.N}_{cfg.obj}_Leps{cfg.label_eps:.1f}_LN{cfg.label_N}_seed{cfg.seed}"
+
+                # LDP 데이터 로드 및 전처리
+                output_dir = Path(cfg.output_dir) / Path(cfg.csv_path).stem / mechanism_name
+                train_ldp = pd.read_csv(output_dir / f"{base_filename}_train.csv", index_col=0)
+                test_ldp = pd.read_csv(output_dir / f"{base_filename}_test.csv", index_col=0)
+                train_ldp_imp, test_ldp_imp = self._impute(train_ldp, test_ldp)
+                train_ldp_scaled, test_ldp_scaled = self._scale(train_ldp_imp[feats], test_ldp_imp[feats])
+                X_ldp_train, X_ldp_test = add_bias(train_ldp_scaled.values), add_bias(test_ldp_scaled.values)
+                y_ldp_train, y_ldp_test = train_ldp_imp[cfg.label_col].values, test_ldp_imp[cfg.label_col].values
+                
+                # --- ★ 모델별 LDP 레이블 전처리 (루프 안 여기에 위치) ★ ---
+                # (이전 대화에서 수정한 논리적 오류 포함)
+                if cfg.model_type == 'linear' and cfg.transform_label_log:
+                    y_ldp_train = np.log1p(y_ldp_train)
+
+                if cfg.model_type == 'logistic_multi':
+                    oe_ldp = OrdinalEncoder(handle_unknown='use_encoded_value', unknown_value=-1, dtype=int)
+                    y_ldp_train = oe_ldp.fit_transform(y_ldp_train.reshape(-1, 1)).ravel()
+                    y_ldp_test = oe_ldp.transform(y_ldp_test.reshape(-1, 1)).ravel()
+
+                # ▼ 추가: 선형/로지스틱은 LDP도 원본 y 스케일로 맞춤
+                #if cfg.model_type in ('linear', 'logistic'):
+                #    y_ldp_train = y_orig_train
+                #    y_ldp_test = y_orig_test
+
+                beta_ldp = self._train_gd(X_ldp_train, y_ldp_train)
+                
+                # 이름 형식을 만드는 로직을 더 명확하게 수정합니다.
+                if 'pm' in mechanism_key:
+                    # 'pm_t2'를 'PM'과 '2'로 분리
+                    parts = mechanism_key.split('_t')
+                    mech_name = parts[0].upper() # 'PM'
+                    t_val = parts[1] # '2'
+                    # f-string을 사용해 'LDP-PM(T2)' 형태로 조합
+                    ldp_name = f"LDP-{mech_name}(T{t_val})"
+                else:
+                    # 'qm' -> 'LDP-QM'
+                    ldp_name = f"LDP-{mechanism_key.upper()}"
+                
+                ldp_results_to_evaluate[ldp_name] = {'beta': beta_ldp, 'X_test': X_ldp_test, 'y_test': y_ldp_test}
+
+            # --- 4. 모든 결과 통합 평가 ---
+            final_scores = {}
+            if cfg.model_type == 'linear':
+                # 원본 평가
+                pred_orig = X_orig_test @ beta_orig
+                if cfg.transform_label_log:
+                    y_orig_test, pred_orig = np.expm1(y_orig_test), np.expm1(pred_orig)
+                final_scores['Full'] = {'RMSE': np.sqrt(mean_squared_error(y_orig_test, pred_orig)), 'MAE': mean_absolute_error(y_orig_test, pred_orig)}
+                
+                # LDP 평가
+                for name, data in ldp_results_to_evaluate.items():
+                    try:
+                        # 루프 내에서 올바른 변수를 사용하도록 수정
+                        pred_ldp = data['X_test'] @ data['beta']
+                        y_ldp_test_local = data['y_test']
+
+                        if cfg.transform_label_log:
+                            y_ldp_test_local = np.expm1(y_ldp_test_local)
+                            pred_ldp = np.expm1(pred_ldp)
+                        
+                        rmse = np.sqrt(mean_squared_error(y_orig_test, pred_ldp))
+                        mae = mean_absolute_error(y_orig_test, pred_ldp)
+                        final_scores[name] = {'RMSE': rmse, 'MAE': mae}
+                    except (ValueError, OverflowError) as e:
+                        logging.warning(f"Could not calculate metrics for '{name}' due to error: {e}. Recording as NaN.")
+                        final_scores[name] = {'RMSE': np.nan, 'MAE': np.nan}
 
             elif cfg.model_type == 'logistic':
+                # 원본 평가
                 prob_orig = self._sigmoid(X_orig_test @ beta_orig)
-                prob_ldp = self._sigmoid(X_ldp_test @ beta_ldp)
                 thr_orig = self._find_optimal_threshold(y_orig_test, prob_orig)
-                thr_ldp = self._find_optimal_threshold(y_ldp_test, prob_ldp)
                 pred_orig_class = (prob_orig >= thr_orig).astype(int)
-                pred_ldp_class = (prob_ldp >= thr_ldp).astype(int)
+                final_scores['Full'] = {'Accuracy': accuracy_score(y_orig_test, pred_orig_class), 'AUC': roc_auc_score(y_orig_test, prob_orig)}
                 
-                data['Full'] = {'Accuracy': accuracy_score(y_orig_test, pred_orig_class), 'AUC': roc_auc_score(y_orig_test, prob_orig)}
-                data['LDP'] = {'Accuracy': accuracy_score(y_ldp_test, pred_ldp_class), 'AUC': roc_auc_score(y_ldp_test, prob_ldp)}
-                df_scores = pd.DataFrame(data).T.round(3)
+                # LDP 평가
+                for name, data in ldp_results_to_evaluate.items():
+                    try:
+                        # 루프 내에서 올바른 변수를 사용하도록 수정
+                        y_ldp_test_local = data['y_test']
+                        prob_ldp = self._sigmoid(data['X_test'] @ data['beta'])
+                        thr_ldp = self._find_optimal_threshold(y_orig_test, prob_ldp)
+                        pred_ldp_class = (prob_ldp >= thr_ldp).astype(int)
+                        
+                        accuracy = accuracy_score(y_orig_test, pred_ldp_class)
+                        auc = roc_auc_score(y_orig_test, prob_ldp)
+                        final_scores[name] = {'Accuracy': accuracy, 'AUC': auc}
+                    except (ValueError, OverflowError) as e:
+                        logging.warning(f"Could not calculate metrics for '{name}' due to error: {e}. Recording as NaN.")
+                        final_scores[name] = {'Accuracy': np.nan, 'AUC': np.nan}
+
 
             elif cfg.model_type == 'logistic_multi':
+                # --- 원본 평가 (Full) ---
                 pred_orig_proba = self._softmax(X_orig_test @ beta_orig)
-                pred_ldp_proba = self._softmax(X_ldp_test @ beta_ldp)
-                pred_orig_class = np.argmax(pred_orig_proba, axis=1)
-                pred_ldp_class = np.argmax(pred_ldp_proba, axis=1)
+                y_true_full = y_orig_test.astype(int, copy=False)
+                mask_full = (y_true_full != -1)  # OrdinalEncoder의 미지 클래스(-1) 제거
 
-                for m, y_true, proba, y_hat in [('Full', y_orig_test, pred_orig_proba, pred_orig_class), 
-                                               ('LDP', y_ldp_test, pred_ldp_proba, pred_ldp_class)]:
-                    labels = np.unique(y_true)
-                    auc_per_cls = []
-                    for c in labels:
-                        y_bin = (y_true == c).astype(int)
-                        score_c = proba[:, c]
-                        if len(np.unique(y_bin)) < 2:
-                            auc_val = float('nan')
+                if np.any(mask_full):
+                    y_t = y_true_full[mask_full]
+                    p   = pred_orig_proba[mask_full]
+                    y_hat = np.argmax(p, axis=1)
+
+                    # 클래스별 AUC → 매크로 평균
+                    K = p.shape[1]
+                    auc_list = []
+                    for c in range(K):
+                        y_bin = (y_t == c).astype(int)
+                        if y_bin.min() == y_bin.max():  # 양/음이 모두 있어야 AUC 정의 가능
+                            auc_list.append(float('nan'))
                         else:
-                            auc_val = roc_auc_score(y_bin, score_c)
-                        auc_per_cls.append(auc_val)
-                    
-                    auc_macro = np.nanmean(auc_per_cls) if not all(np.isnan(auc_per_cls)) else float('nan')
-                    data[m] = {'Accuracy': accuracy_score(y_true, y_hat), 'AUC_macro': auc_macro}
-                df_scores = pd.DataFrame(data).T.round(3)
+                            auc_list.append(roc_auc_score(y_bin, p[:, c]))
+                    auc_macro = np.nanmean(auc_list) if not np.all(np.isnan(auc_list)) else float('nan')
 
+                    final_scores['Full'] = {
+                        'Accuracy': accuracy_score(y_t, y_hat),
+                        'AUC_macro': auc_macro
+                    }
+                else:
+                    final_scores['Full'] = {'Accuracy': float('nan'), 'AUC_macro': float('nan')}
+
+                # --- LDP 평가 ---
+                for name, data in ldp_results_to_evaluate.items():
+                    try:
+                        proba = self._softmax(data['X_test'] @ data['beta'])
+                        y_true_orig = y_orig_test.astype(int, copy=False)
+                        mask = np.ones_like(y_true_orig, dtype=bool)
+
+                        if np.any(mask):
+                            y_t = y_true_orig[mask]
+                            p   = proba[mask]
+                            y_hat = np.argmax(p, axis=1)
+
+                            K = p.shape[1]
+                            auc_list = []
+                            for c in range(K):
+                                y_bin = (y_t == c).astype(int)
+                                if y_bin.min() == y_bin.max():
+                                    auc_list.append(float('nan'))
+                                else:
+                                    auc_list.append(roc_auc_score(y_bin, p[:, c]))
+                            auc_macro = np.nanmean(auc_list) if not np.all(np.isnan(auc_list)) else float('nan')
+
+                            final_scores[name] = {
+                                'Accuracy': accuracy_score(y_t, y_hat),
+                                'AUC_macro': auc_macro
+                            }
+                        else:
+                            final_scores[name] = {'Accuracy': float('nan'), 'AUC_macro': float('nan')}
+                    
+                    except (ValueError, OverflowError) as e:
+                        logging.warning(
+                            f"Could not calculate metrics for '{name}' due to error: {e}. Recording as NaN."
+                        )
+                        final_scores[name] = {'Accuracy': np.nan, 'AUC_macro': np.nan}
+
+            df_scores = pd.DataFrame(final_scores).T.round(3)
             logging.info("Model Performance:\n%s", df_scores)
             return df_scores
         
@@ -289,30 +394,25 @@ def get_total_features(csv_path: Path, label_col: str) -> int:
     return len([col for col in final_cols.columns if col != label_col])
 
 def main(args: argparse.Namespace):
-    # 1. 기존 CSV 결과 파일 준비 (헤더 작성)
+    # 1. 통합 결과 파일에 공통 헤더 작성
     base_result_dir = Path(args.total_result_dir)
     dataset_name= Path(args.csv_path).stem
     total_result_file = base_result_dir / dataset_name / 'result_summary.csv'
     total_result_file.parent.mkdir(parents=True, exist_ok=True)
     total_features = get_total_features(Path(args.csv_path), args.label_col)
 
-    if args.mechanism == 'qm':
-        with open(total_result_file, 'a', newline='') as f:
-            f.write("\n" + "="*50 + "\n")
-            f.write(f"[batch: {args.batch_size} / lr: {args.learning_rate} / epochs: {args.epochs}]\n"
-                    f"eps: {args.eps} / label_eps: {args.label_eps} / N: {args.N} / label_N: {args.label_N} \n")
+    with open(total_result_file, 'a', newline='') as f:
+        f.write("\n" + "="*50 + "\n")
+        # 모든 메커니즘에 적용되는 공통 파라미터 정보만 기록
+        f.write(f"[batch: {args.batch_size} / lr: {args.learning_rate} / epochs: {args.epochs}]\n"
+                f"eps: {args.eps} / label_eps: {args.label_eps} / N: {args.N} / label_N: {args.label_N}\n")
 
-        exp_name = (f"eps{args.eps}_label-eps{args.label_eps}_N{args.N}_LN{args.label_N}_"
-                    f"lr{args.learning_rate}_bs{args.batch_size}_ep{args.epochs}")
-    elif args.mechanism == 'pm':
-        with open(total_result_file, 'a', newline='') as f:
-            f.write("\n" + "="*50 + "\n")
-            f.write(f"[batch: {args.batch_size} / lr: {args.learning_rate} / epochs: {args.epochs}]\n"
-                    f"eps: {args.eps} / label_eps: {args.label_eps} / t: {args.t} \n")
+    # 2. exp_name 생성
+    exp_name = (f"eps{args.eps}_label-eps{args.label_eps}_N{args.N}_LN{args.label_N}_"
+                f"lr{args.learning_rate}_bs{args.batch_size}_ep{args.epochs}")
 
-        exp_name = (f"eps{args.eps}_label-eps{args.label_eps}_t{args.t}_"
-                    f"lr{args.learning_rate}_bs{args.batch_size}_ep{args.epochs}")
-    exp_dir = Path(args.result_dir) / Path(args.csv_path).stem / exp_name
+    # 3. 결과 디렉터리 설정
+    exp_dir = Path(args.result_dir) / dataset_name / exp_name
     exp_dir.mkdir(parents=True, exist_ok=True)
 
     log_file = exp_dir / 'run.log'
@@ -381,7 +481,7 @@ if __name__ == '__main__':
     parser.add_argument('--seeds', type=int, nargs='+', default=[0,1,2,3,4,5,6,7,8,9],
                         help='실행할 랜덤 시드 목록 (공백으로 구분)')
     parser.add_argument('--transform_label_log', type=str2bool, default=False)
-
+    parser.add_argument('--obj', type=str, default='avg', choices=['avg', 'worst'])
     
     # --- 데이터 및 경로 (Data and Paths) ---
     parser.add_argument('--csv_path', type=str, default='data/gamma.csv', help='입력 원본 데이터 CSV 경로')
@@ -397,8 +497,9 @@ if __name__ == '__main__':
     parser.add_argument('--batch_size', type=int, default=512, help='경사 하강법 배치 크기')
 
     # --- LDP 파라미터 (LDP Parameters) ---
-    parser.add_argument('--mechanism', help='[qm, pm, duchi, to]')
-    parser.add_argument('--t', type=int, help='LDP parameter for PM. t=2: PM, t=3: PM_sub')
+    parser.add_argument('--mechanisms', type=str, nargs='+', default=['qm', 'pm_t3'],
+                        help="비교할 LDP 메커니즘 목록. 예: qm pm_t2 pm_t3")
+    #parser.add_argument('--t', type=int, help='LDP parameter for PM. t=2: PM, t=3: PM_sub')
     parser.add_argument('--eps', type=float, default=3.0, help='피처 epsilon 값')
     parser.add_argument('--label_eps', type=float, default=3.0, help='레이블 epsilon 값')
     parser.add_argument('--N', type=int, default=7, help='피처 LDP 메커니즘의 해상도')
