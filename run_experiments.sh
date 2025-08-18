@@ -7,11 +7,11 @@
 
 # Define common parameters for all experiments
 COMMON_SEEDS=(0 1 2 3 4 5 6 7 8 9)
-EPS_VALUES=(1.0 3.0 5.0)
+EPS_VALUES=(1.0 2.0 3.0 4.0 5.0)
 N_LIST=(7)
-LEARNING_RATE=(0.01 0.05 0.1)
-EPOCHS=(10 1000)
-BATCH_SIZES=(512 4096 -1) # -1 for full-batch mode
+LEARNING_RATE=(0.05)
+EPOCHS=(100)
+BATCH_SIZES=(-1) # -1 for full-batch mode
 REG_LAMBDA=0.1
 RESULT_ROOT_DIR="results_unified"
 LDP_DATA_ROOT_DIR="transformed_data_batch_label"
@@ -26,14 +26,14 @@ echo "#######################################"
 echo "# Running Linear Regression Experiments #"
 echo "#######################################"
 LINEAR_CSV_PATHS=(
+    "data/elevators.csv"
     "data/CASP.csv"
-    "data/OnlineNewsPopularity.csv"
 )
 
 for CSV_PATH in "${LINEAR_CSV_PATHS[@]}"; do
     DATASET_NAME=$(basename "${CSV_PATH%.*}")
     TRANSFORM_LABEL_LOG_FLAG="False"
-    if [[ "${DATASET_NAME}" == "OnlineNewsPopularity" ]]; then
+    if [[ "${DATASET_NAME}" == "OnlineNewsPopularity" || "${DATASET_NAME}" == "Beijing_housing" || "${DATASET_NAME}" == "cal_housing" ]]; then
         TRANSFORM_LABEL_LOG_FLAG="True"
     fi
 
@@ -42,11 +42,12 @@ for CSV_PATH in "${LINEAR_CSV_PATHS[@]}"; do
             for LR in "${LEARNING_RATE[@]}"; do
                 for EPOCH in "${EPOCHS[@]}"; do
                     for EPS in "${EPS_VALUES[@]}"; do
-                        echo "Processing: Linear | ${DATASET_NAME} | N=${CURRENT_N} | eps=${EPS} | bs=${BATCH} | lr=${LR} | epoch=${EPOCH}"
+                        
+                        echo "Processing: Linear | ${DATASET_NAME} | eps=${EPS} | bs=${BATCH} | lr=${LR} | epoch=${EPOCH} | All Mechanisms"
                         python model.py \
                             --model_type "linear" \
                             --csv_path "${CSV_PATH}" \
-                            --N "${CURRENT_N}" --label_N 7 \
+                            --N "${CURRENT_N}" --label_N "${CURRENT_N}" \
                             --seeds "${COMMON_SEEDS[@]}" \
                             --eps "${EPS}" --label_eps "${EPS}" \
                             --learning_rate "${LR}" --epochs "${EPOCH}" \
@@ -55,16 +56,14 @@ for CSV_PATH in "${LINEAR_CSV_PATHS[@]}"; do
                             --transform_label_log "${TRANSFORM_LABEL_LOG_FLAG}" \
                             --output_dir "${LDP_DATA_ROOT_DIR}" \
                             --result_dir "${RESULT_ROOT_DIR}" \
-                            --total_result_dir "${RESULT_ROOT_DIR}" \
-                            --mechanism "pm" \
-                            --t 3 \
+                            --total_result_dir "${RESULT_ROOT_DIR}"
+                            # --mechanisms 인자는 기본값을 사용하므로 생략 가능
                     done
                 done
             done
         done
     done
 done
-
 
 # =====================================================
 #  2. Logistic Regression (Binary) Experiments
@@ -85,7 +84,8 @@ for CSV_PATH in "${LOGISTIC_CSV_PATHS[@]}"; do
             for LR in "${LEARNING_RATE[@]}"; do
                 for EPOCH in "${EPOCHS[@]}"; do
                     for EPS in "${EPS_VALUES[@]}"; do
-                        echo "Processing: Logistic | ${DATASET_NAME} | N=${CURRENT_N} | eps=${EPS} | bs=${BATCH} | lr=${LR} | epoch=${EPOCH}"
+                        
+                        echo "Processing: Logistic | ${DATASET_NAME} | eps=${EPS} | bs=${BATCH} | lr=${LR} | epoch=${EPOCH} | All Mechanisms"
                         python model.py \
                             --model_type "logistic" \
                             --csv_path "${CSV_PATH}" \
@@ -98,13 +98,13 @@ for CSV_PATH in "${LOGISTIC_CSV_PATHS[@]}"; do
                             --output_dir "${LDP_DATA_ROOT_DIR}" \
                             --result_dir "${RESULT_ROOT_DIR}" \
                             --total_result_dir "${RESULT_ROOT_DIR}"
+
                     done
                 done
             done
         done
     done
 done
-
 
 # =====================================================
 #  3. Multi-class Logistic Regression Experiments
@@ -114,8 +114,8 @@ echo "######################################################"
 echo "# Running Multi-class Logistic Regression Experiments #"
 echo "######################################################"
 MULTI_CSV_PATHS=(
-    "data/wine.csv"
     "data/shuttle.csv"
+    "data/wine.csv"
 )
 
 for CSV_PATH in "${MULTI_CSV_PATHS[@]}"; do
@@ -125,7 +125,8 @@ for CSV_PATH in "${MULTI_CSV_PATHS[@]}"; do
             for LR in "${LEARNING_RATE[@]}"; do
                 for EPOCH in "${EPOCHS[@]}"; do
                     for EPS in "${EPS_VALUES[@]}"; do
-                        echo "Processing: Multi-Logistic | ${DATASET_NAME} | N=${CURRENT_N} | eps=${EPS} | bs=${BATCH} | lr=${LR} | epoch=${EPOCH}"
+                        
+                        echo "Processing: Multi-Logistic | ${DATASET_NAME} | eps=${EPS} | bs=${BATCH} | lr=${LR} | epoch=${EPOCH} | All Mechanisms"
                         python model.py \
                             --model_type "logistic_multi" \
                             --csv_path "${CSV_PATH}" \
@@ -138,12 +139,14 @@ for CSV_PATH in "${MULTI_CSV_PATHS[@]}"; do
                             --output_dir "${LDP_DATA_ROOT_DIR}" \
                             --result_dir "${RESULT_ROOT_DIR}" \
                             --total_result_dir "${RESULT_ROOT_DIR}"
+
                     done
                 done
             done
         done
     done
 done
+END
 
 echo ""
 echo "All Machine Learning Experiments Completed."
