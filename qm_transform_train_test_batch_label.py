@@ -218,7 +218,7 @@ class DatasetTransformer:
         num_sam = len(self.train_df)
         final_df = pd.DataFrame(index=self.train_df.index)
 
-        # 피처 변환 (간소화된 버전)
+        # (The feature transformation part remains unchanged)
         if self.numeric_cols:
             print(f"  - {len(self.numeric_cols)}개의 수치형 피처 변환...")
             if not self.feature_mechanism_numerical:
@@ -230,25 +230,29 @@ class DatasetTransformer:
 
         # --- 레이블 변환 ---
         if self.args.transform_label_numerical:
-            print(f"  - ✅ 수치형 레이블 '{self.args.label_col}' 변환 및 선형 보간 역변환...")
-            
-            # 1. 원본 -> LDP 인덱스
+            # 1. 원본 -> LDP 인덱스 (This part is common)
             scaled_label = self.scalers[self.args.label_col].transform(self.train_df[[self.args.label_col]]).flatten()
             perturbed_indices = self.label_mechanism_numerical.perturb_batch_to_indices(scaled_label)
             
-            # 2. ✨ [새로운 역변환] LDP 인덱스 -> 원본 범위로 선형 보간
-            idx_min, idx_max = self.ldp_index_min, self.ldp_index_max
-            val_min, val_max = self.original_label_min, self.original_label_max
-
-            # 분모가 0이 되는 경우 방지
-            if idx_max == idx_min:
-                inversed_values = np.full_like(perturbed_indices, val_min, dtype=float)
+            # 2. Check the new --label_index flag
+            if self.args.label_index:
+                # If True, use the perturbed indices directly
+                print(f"  - ✅ 수치형 레이블 '{self.args.label_col}'을 LDP 인덱스로 변환...")
+                final_df[self.args.label_col] = perturbed_indices
             else:
-                # 선형 보간 공식
-                normalized_pos = (perturbed_indices - idx_min) / (idx_max - idx_min)
-                inversed_values = normalized_pos * (val_max - val_min) + val_min
+                # If False, perform the existing linear interpolation
+                print(f"  - ✅ 수치형 레이블 '{self.args.label_col}' 변환 및 선형 보간 역변환...")
+                idx_min, idx_max = self.ldp_index_min, self.ldp_index_max
+                val_min, val_max = self.original_label_min, self.original_label_max
+
+                if idx_max == idx_min:
+                    inversed_values = np.full_like(perturbed_indices, val_min, dtype=float)
+                else:
+                    normalized_pos = (perturbed_indices - idx_min) / (idx_max - idx_min)
+                    inversed_values = normalized_pos * (val_max - val_min) + val_min
+                
+                final_df[self.args.label_col] = inversed_values
             
-            final_df[self.args.label_col] = inversed_values
             print_debug_info(self.train_df, final_df, self.args.label_col)
         else:
             print(f"  - ⚠️ 레이블 변환 플래그가 설정되지 않아 원본 값을 사용합니다.")
@@ -304,9 +308,14 @@ class DatasetTransformer:
              label_eps_suffix = f"_Leps{label_eps}"
         
         label_n_suffix = ""
+        # ▼▼▼ [추가] 역변환 방식에 따른 접미사 생성
+        label_inverse_suffix = ""
         if self.args.transform_label_numerical:
             label_n = self.args.label_N if self.args.label_N is not None else self.args.N
             label_n_suffix = f"_LN{label_n}"
+            # label_index 값에 따라 _invIdx (인덱스) 또는 _invLin (선형보간) 추가
+            label_inverse_suffix = "_invIdx" if self.args.label_index else "_invLin"
+        # ▲▲▲ 
 
         ## 파일 이름에 seed 값 추가
         output_csv_filename = f"{base_filename}_Eps{self.args.eps}_N{self.args.N}_{self.args.obj}{cat_suffix}{label_eps_suffix}{label_n_suffix}_seed{self.args.seed}{file_suffix}.csv"
@@ -369,6 +378,7 @@ if __name__ == '__main__':
     parser.add_argument('--test_size', type=float, default=0.2)
     parser.add_argument('--random_state', type=int, default=42)
     parser.add_argument('--transform_label_log', type=str2bool, default=True)
+    parser.add_argument('--label_index', type=str2bool, default=False, help='label 역변환 여부' )
 
     # 다중 시드 지원
     parser.add_argument('--seed', type=int, default=0)
@@ -398,3 +408,4 @@ if __name__ == '__main__':
         transformer.save(test_df,   args.output_dir, "_test")
 
     print("\n✨ 모든 변환 작업이 완료되었습니다.")
+
