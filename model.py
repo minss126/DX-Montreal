@@ -194,7 +194,7 @@ class UnifiedExperiment:
             X_orig_train, X_orig_test = add_bias(train_orig_scaled.values), add_bias(test_orig_scaled.values)
             y_orig_train, y_orig_test = train_orig_imp[cfg.label_col].values, test_orig_imp[cfg.label_col].values
 
-            # --- ★ 모델별 원본 레이블 전처리 (여기에 위치) ★ ---
+            # --- 모델별 원본 레이블 전처리 ---
             if cfg.model_type == 'linear' and cfg.transform_label_log:
                 y_orig_train, y_orig_test = np.log1p(y_orig_train), np.log1p(y_orig_test)
             elif cfg.model_type == 'logistic_multi':
@@ -228,7 +228,7 @@ class UnifiedExperiment:
                 X_ldp_train, X_ldp_test = add_bias(train_ldp_scaled.values), add_bias(test_ldp_scaled.values)
                 y_ldp_train, y_ldp_test = train_ldp_imp[cfg.label_col].values, test_ldp_imp[cfg.label_col].values
                 
-                # --- ★ 모델별 LDP 레이블 전처리 (루프 안 여기에 위치) ★ ---
+                # --- 모델별 LDP 레이블 전처리 ---
                 # (이전 대화에서 수정한 논리적 오류 포함)
                 if cfg.model_type == 'linear' and cfg.transform_label_log:
                     y_ldp_train = np.log1p(y_ldp_train)
