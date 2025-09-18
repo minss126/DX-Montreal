@@ -4,7 +4,7 @@ import make_mechanism_worst
 import numpy as np
 import pandas as pd
 import pickle, os, argparse, time, warnings
-from sklearn.preprocessing import MinMaxScaler
+from sklearn.preprocessing import MinMaxScaler, StandardScaler
 from sklearn.model_selection import train_test_split
 from tqdm import tqdm
 from pathlib import Path
@@ -41,13 +41,13 @@ class LDPMechanism:
         else:
             self.a_indices = np.concatenate([np.arange(-self.n_param, 0), np.arange(1, self.n_param + 1)])
         
-        # ✨ 역변환을 위한 인덱스-값 맵
+        # 역변환을 위한 인덱스-값 맵
         self.a_index_to_value_map = {idx: val for idx, val in zip(self.a_indices, self.a_values)}
             
         print(f"Numerical LDP 메커니즘 로드 완료 (epsilon={self.epsilon}, N={self.N}).")
     
     def map_indices_to_values(self, indices):
-        """ ✨ [역변환용] LDP 메커니즘이 출력한 정수 인덱스를 [-1, 1] 범위의 값으로 변환합니다. """
+        """ [역변환용] LDP 메커니즘이 출력한 정수 인덱스를 [-1, 1] 범위의 값으로 변환합니다. """
         return np.vectorize(self.a_index_to_value_map.get)(indices)
 
     def get_prob_vectors_batch(self, x_scaled_batch):
@@ -172,7 +172,7 @@ class DatasetTransformer:
         self.train_df, self.test_df = None, None
         
         # 역변환에 필요한 값들을 저장할 변수
-        self.scalers = {}
+        self.preprocessors = {}
         self.feature_mechanism_numerical = None
         self.label_mechanism_numerical = None
         
@@ -190,7 +190,11 @@ class DatasetTransformer:
         print("\nTrain 데이터로 스케일러와 인코더를 학습합니다...")
         # 피처 스케일러
         for col in self.numeric_cols:
-            self.scalers[col] = MinMaxScaler(feature_range=(-1, 1)).fit(self.train_df[[col]])
+            std_scaler = StandardScaler().fit(self.train_df[[col]])
+            train_std = std_scaler.transform(self.train_df[[col]])
+            minmax_scaler = MinMaxScaler(feature_range=(-1, 1)).fit(train_std)
+
+            self.preprocessors[col] = {'std_scaler': std_scaler, 'minmax_scaler': minmax_scaler}
         
         # 수치형 레이블 변환 준비
         if self.args.transform_label_numerical:
@@ -199,11 +203,17 @@ class DatasetTransformer:
             
             print(f"[Info] 수치형 레이블 변환을 위해 LDP 메커니즘과 역변환 파라미터를 준비합니다 (epsilon={label_eps:.4f}, N={label_n}).")
             
-            # 1. LDP 입력용 스케일러 ([-1, 1]로 변환)
-            self.scalers[self.args.label_col] = MinMaxScaler(feature_range=(-1, 1)).fit(self.train_df[[self.args.label_col]])
+            # 1. StandardScaler for Label
+            label_std_scaler = StandardScaler().fit(self.train_df[[self.args.label_col]])
+            train_label_std = label_std_scaler.transform(self.train_df[[self.args.label_col]])
+
+            # 2. MinMaxScaler for LDP input
+            label_minmax_scaler = MinMaxScaler(feature_range=(-1, 1)).fit(train_label_std)
+            self.preprocessors[self.args.label_col] = {'std_scaler': label_std_scaler, 'minmax_scaler': label_minmax_scaler}
+            
             self.label_mechanism_numerical = load_or_create_mechanism(self.args.obj, label_eps, label_n, usage="레이블")
 
-            # 2. ✨ [핵심] 역변환(선형 보간)에 사용할 min/max 값 저장
+            # 3. 역변환(선형 보간)에 사용할 min/max 값 저장
             self.ldp_index_min = self.label_mechanism_numerical.a_indices.min()
             self.ldp_index_max = self.label_mechanism_numerical.a_indices.max()
             self.original_label_min = self.train_df[self.args.label_col].min()
@@ -223,7 +233,14 @@ class DatasetTransformer:
             print(f"  - {len(self.numeric_cols)}개의 수치형 피처 변환...")
             if not self.feature_mechanism_numerical:
                 self.feature_mechanism_numerical = load_or_create_mechanism(self.args.obj, self.args.eps, self.args.N, usage="피처")
-            scaled_data = np.array([self.scalers[col].transform(self.train_df[[col]]).flatten() for col in self.numeric_cols]).T
+            
+            scaled_data_list = []
+            for col in self.numeric_cols:
+                train_std = self.preprocessors[col]['std_scaler'].transform(self.train_df[[col]])
+                train_minmax = self.preprocessors[col]['minmax_scaler'].transform(train_std)
+                scaled_data_list.append(train_minmax.flatten())
+
+            scaled_data = np.array(scaled_data_list).T
             perturbed_indices = self.feature_mechanism_numerical.perturb_batch_to_indices(scaled_data.flatten()).reshape(num_sam, -1)
             feature_df = pd.DataFrame(perturbed_indices, index=self.train_df.index, columns=self.numeric_cols)
             final_df = pd.concat([final_df, feature_df], axis=1)
@@ -231,7 +248,8 @@ class DatasetTransformer:
         # --- 레이블 변환 ---
         if self.args.transform_label_numerical:
             # 1. 원본 -> LDP 인덱스 (This part is common)
-            scaled_label = self.scalers[self.args.label_col].transform(self.train_df[[self.args.label_col]]).flatten()
+            label_std = self.preprocessors[self.args.label_col]['std_scaler'].transform(self.train_df[[self.args.label_col]])
+            scaled_label = self.preprocessors[self.args.label_col]['minmax_scaler'].transform(label_std).flatten()
             perturbed_indices = self.label_mechanism_numerical.perturb_batch_to_indices(scaled_label)
             
             # 2. Check the new --label_index flag
@@ -260,7 +278,6 @@ class DatasetTransformer:
 
         return final_df
 
-
     def _transform_test_deterministic(self):
         print("\nTest 데이터셋 변환 중 (Deterministic)...")
         transformed_features = []
@@ -271,7 +288,9 @@ class DatasetTransformer:
             
             perturbed_data = np.zeros((len(self.test_df), len(self.numeric_cols)))
             for i, col in enumerate(self.numeric_cols):
-                scaled_vals = self.scalers[col].transform(self.test_df[[col]])
+                test_std = self.preprocessors[col]['std_scaler'].transform(self.test_df[[col]])
+                scaled_vals = self.preprocessors[col]['minmax_scaler'].transform(test_std)
+                
                 perturbed_vals = [self.feature_mechanism_numerical.perturb_to_index_deterministic(val) for val in tqdm(scaled_vals.flatten(), desc=f'  -> Det. Perturbing {col}', leave=False)]
                 perturbed_data[:, i] = perturbed_vals
             transformed_features.append(pd.DataFrame(perturbed_data, index=self.test_df.index, columns=self.numeric_cols))
@@ -297,28 +316,40 @@ class DatasetTransformer:
         print("\n데이터셋 변환 완료.")
         return perturbed_train_df, perturbed_test_df
     
+    def _get_base_filename(self):
+        """ model.py와 호환되는 기본 파일 이름을 생성합니다. """
+        base_filename = Path(self.args.csv_path).stem
+        label_eps = self.args.label_epsilon if self.args.label_epsilon is not None else self.args.eps
+        label_n = self.args.label_N if self.args.label_N is not None else self.args.N
+        
+        # model.py에서 사용하는 파일명 형식
+        return (f"{base_filename}_Eps{self.args.eps:.1f}_N{self.args.N}_{self.args.obj}_"
+                f"Leps{label_eps:.1f}_LN{label_n}_seed{self.args.seed}")
+    
+    def save_label_inversion_metadata(self, output_dir):
+        """
+        레이블이 정수 인덱스로 변환된 경우, 역변환에 필요한 파라미터
+        (원본 min/max, 인덱스 min/max)를 .pkl 파일로 저장합니다.
+        """
+        if self.args.transform_label_numerical and self.args.label_index:
+            metadata_to_save = {
+                "original_label_min": self.original_label_min,
+                "original_label_max": self.original_label_max,
+                "ldp_index_min": self.ldp_index_min,
+                "ldp_index_max": self.ldp_index_max
+            }
+
+            base_name = self._get_base_filename()
+            metadata_filepath = os.path.join(output_dir, f"{base_name}_metadata.pkl")
+            
+            with open(metadata_filepath, 'wb') as f:
+                pickle.dump(metadata_to_save, f)
+            print(f"레이블 역변환 메타데이터 저장: {metadata_filepath}")
+    
     def save(self, df, output_dir, file_suffix):
         if not os.path.exists(output_dir): os.makedirs(output_dir)
-        base_filename = os.path.splitext(os.path.basename(self.args.csv_path))[0]
-        cat_suffix = "_withCat" if self.args.with_categorical else ""
-        
-        label_eps_suffix = ""
-        if (self.args.transform_label_numerical or self.args.transform_label_categorical):
-             label_eps = self.args.label_epsilon if self.args.label_epsilon is not None else self.args.eps
-             label_eps_suffix = f"_Leps{label_eps}"
-        
-        label_n_suffix = ""
-        # ▼▼▼ [추가] 역변환 방식에 따른 접미사 생성
-        label_inverse_suffix = ""
-        if self.args.transform_label_numerical:
-            label_n = self.args.label_N if self.args.label_N is not None else self.args.N
-            label_n_suffix = f"_LN{label_n}"
-            # label_index 값에 따라 _invIdx (인덱스) 또는 _invLin (선형보간) 추가
-            label_inverse_suffix = "_invIdx" if self.args.label_index else "_invLin"
-        # ▲▲▲ 
-
-        ## 파일 이름에 seed 값 추가
-        output_csv_filename = f"{base_filename}_Eps{self.args.eps}_N{self.args.N}_{self.args.obj}{cat_suffix}{label_eps_suffix}{label_n_suffix}_seed{self.args.seed}{file_suffix}.csv"
+        base_name = self._get_base_filename()
+        output_csv_filename = f"{base_name}{file_suffix}.csv"
         output_csv_path = os.path.join(output_dir, output_csv_filename)
         df.to_csv(output_csv_path, index=True)
         print(f"'{output_csv_path}'에 저장되었습니다.")
@@ -404,8 +435,9 @@ if __name__ == '__main__':
         train_df, test_df = transformer.transform()
         print(f"    -> 변환 완료: {time.time() - start:.2f} 초")
 
+        transformer.save_label_inversion_metadata(args.output_dir)
+        
         transformer.save(train_df, args.output_dir, "_train")
         transformer.save(test_df,   args.output_dir, "_test")
 
     print("\n✨ 모든 변환 작업이 완료되었습니다.")
-
