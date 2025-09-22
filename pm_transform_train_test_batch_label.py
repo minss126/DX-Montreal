@@ -83,8 +83,8 @@ class DatasetTransformer:
         self.label_mechanism_numerical = None
         self.label_mechanism_categorical = None
         
-        self.ldp_val_min = None
-        self.ldp_val_max = None
+        self.ldp_index_min = None
+        self.ldp_index_max = None
         self.original_label_min = None
         self.original_label_max = None
         
@@ -114,13 +114,13 @@ class DatasetTransformer:
             
             self.label_mechanism_numerical = pm.PM(label_eps, t=self.args.t)
             
-            self.ldp_val_min = -self.label_mechanism_numerical.A
-            self.ldp_val_max = self.label_mechanism_numerical.A
+            self.ldp_index_min = -self.label_mechanism_numerical.A
+            self.ldp_index_max = self.label_mechanism_numerical.A
             self.original_label_min = self.train_df[self.args.label_col].min()
             self.original_label_max = self.train_df[self.args.label_col].max()
 
             print(f"[Info] 역변환 파라미터 설정:")
-            print(f"  - LDP 출력값 범위: [{self.ldp_val_min:.4f}, {self.ldp_val_max:.4f}]")
+            print(f"  - LDP 출력값 범위: [{self.ldp_index_min:.4f}, {self.ldp_index_max:.4f}]")
             print(f"  - 원본 레이블 범위: [{self.original_label_min:.4f}, {self.original_label_max:.4f}]")
 
         elif self.args.transform_label_categorical:
@@ -160,7 +160,7 @@ class DatasetTransformer:
                 final_df[self.args.label_col] = perturbed_vals
             else:
                 print(f"  - ✅ 수치형 레이블 '{self.args.label_col}' 변환 및 선형 보간 역변환...")
-                pm_min, pm_max = self.ldp_val_min, self.ldp_val_max
+                pm_min, pm_max = self.ldp_index_min, self.ldp_index_max
                 val_min, val_max = self.original_label_min, self.original_label_max
                 
                 if pm_max == pm_min:
@@ -229,8 +229,8 @@ class DatasetTransformer:
             metadata_to_save = {
                 "original_label_min": self.original_label_min,
                 "original_label_max": self.original_label_max,
-                "ldp_val_min": self.ldp_val_min,
-                "ldp_val_max": self.ldp_val_max
+                "ldp_index_min": self.ldp_index_min,
+                "ldp_index_max": self.ldp_index_max
             }
             base_name = self._get_base_filename()
             metadata_filepath = os.path.join(output_dir, f"{base_name}_metadata.pkl")
