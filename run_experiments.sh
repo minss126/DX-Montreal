@@ -10,10 +10,10 @@ COMMON_SEEDS=(0 1 2 3 4 5 6 7 8 9)
 EPS_VALUES=(1.0 2.0 3.0 4.0 5.0)
 N_LIST=(7)
 LEARNING_RATE=(0.05)
-EPOCHS=(100)
-BATCH_SIZES=(-1) # -1 for full-batch mode
+EPOCHS=(5)
+BATCH_SIZES=(64) # -1 for full-batch mode
 REG_LAMBDA=0.1
-RESULT_ROOT_DIR="results_unified"
+RESULT_ROOT_DIR="results_unified_bs64"
 LDP_DATA_ROOT_DIR="transformed_data_batch_label"
 
 echo "Starting All Machine Learning Experiments..."
@@ -26,8 +26,8 @@ echo "#######################################"
 echo "# Running Linear Regression Experiments #"
 echo "#######################################"
 LINEAR_CSV_PATHS=(
-    "data/elevators.csv"
     "data/CASP.csv"
+    "data/wine.csv"
 )
 
 for CSV_PATH in "${LINEAR_CSV_PATHS[@]}"; do
@@ -56,8 +56,8 @@ for CSV_PATH in "${LINEAR_CSV_PATHS[@]}"; do
                             --transform_label_log "${TRANSFORM_LABEL_LOG_FLAG}" \
                             --output_dir "${LDP_DATA_ROOT_DIR}" \
                             --result_dir "${RESULT_ROOT_DIR}" \
-                            --total_result_dir "${RESULT_ROOT_DIR}"
-                            # --mechanisms 인자는 기본값을 사용하므로 생략 가능
+                            --total_result_dir "${RESULT_ROOT_DIR}" \
+                            --inversion_mode "index"
                     done
                 done
             done
@@ -65,6 +65,7 @@ for CSV_PATH in "${LINEAR_CSV_PATHS[@]}"; do
     done
 done
 
+:<< END
 # =====================================================
 #  2. Logistic Regression (Binary) Experiments
 # =====================================================
@@ -73,8 +74,7 @@ echo "###########################################"
 echo "# Running Logistic Regression Experiments #"
 echo "###########################################"
 LOGISTIC_CSV_PATHS=(
-    "data/gamma.csv"
-    "data/credit.csv"
+    "data/wine.csv"
 )
 
 for CSV_PATH in "${LOGISTIC_CSV_PATHS[@]}"; do
@@ -105,7 +105,7 @@ for CSV_PATH in "${LOGISTIC_CSV_PATHS[@]}"; do
         done
     done
 done
-
+END
 # =====================================================
 #  3. Multi-class Logistic Regression Experiments
 # =====================================================
@@ -114,8 +114,7 @@ echo "######################################################"
 echo "# Running Multi-class Logistic Regression Experiments #"
 echo "######################################################"
 MULTI_CSV_PATHS=(
-    "data/shuttle.csv"
-    "data/wine.csv"
+    "data/iris.csv"
 )
 
 for CSV_PATH in "${MULTI_CSV_PATHS[@]}"; do
@@ -130,7 +129,7 @@ for CSV_PATH in "${MULTI_CSV_PATHS[@]}"; do
                         python model.py \
                             --model_type "logistic_multi" \
                             --csv_path "${CSV_PATH}" \
-                            --N "${CURRENT_N}" --label_N 7 \
+                            --N "${CURRENT_N}" --label_N 3 \
                             --seeds "${COMMON_SEEDS[@]}" \
                             --eps "${EPS}" --label_eps "${EPS}" \
                             --learning_rate "${LR}" --epochs "${EPOCH}" \
@@ -146,7 +145,6 @@ for CSV_PATH in "${MULTI_CSV_PATHS[@]}"; do
         done
     done
 done
-END
 
 echo ""
 echo "All Machine Learning Experiments Completed."
