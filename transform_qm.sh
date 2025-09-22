@@ -4,9 +4,9 @@ set -e # 에러 발생 시 즉시 종료
 # ─────────────────────────────────────────────
 # 데이터셋별 설정
 # ─────────────────────────────────────────────
-DATASETS=("elevators" "CASP" "credit" "gamma" "wine" "shuttle")
-# ▼▼▼ [추가] 회귀 데이터셋을 별도로 정의합니다 ▼▼▼
-REGRESSION_DATASETS=("elevators" "CASP")
+#DATASETS=("elevators" "CASP" "credit" "gamma" "wine" "shuttle")
+DATASETS=("gamma" "iris")
+REGRESSION_DATASETS=("elevators" "CASP" "wine")
 
 SEEDS_LIST="0 1 2 3 4 5 6 7 8 9"
 
@@ -40,6 +40,8 @@ for DATASET in "${DATASETS[@]}"; do
       LABEL_N_CURRENT=7
     elif [[ "${DATASET}" == "gamma" || "${DATASET}" == "credit" ]]; then
       LABEL_N_CURRENT=2
+    elif [[ "${DATASET}" == "iris" ]]; then
+      LABEL_N_CURRENT=3
     else
       LABEL_N_CURRENT=${N_VAL}
     fi
@@ -47,9 +49,9 @@ for DATASET in "${DATASETS[@]}"; do
     # 1. eps == label_eps 인 경우 처리
     for EPS_EQ in $EPS_VALUES; do
 
-      # ▼▼▼ [수정] 데이터셋이 회귀용인지 아닌지에 따라 분기 처리 ▼▼▼
+      # 데이터셋이 회귀용인지 아닌지에 따라 분기 처리
       if [[ " ${REGRESSION_DATASETS[@]} " =~ " ${DATASET} " ]]; then
-        # ✅ 회귀 데이터셋인 경우: label_index를 True/False로 반복 실행
+        # 회귀 데이터셋인 경우: label_index를 True/False로 반복 실행
         echo "  -> 회귀 데이터셋으로 감지. label_index 옵션을 모두 테스트합니다."
         for LABEL_INDEX_FLAG in "True" "False"; do
         
@@ -68,17 +70,17 @@ for DATASET in "${DATASETS[@]}"; do
             --N "${N_VAL}" \
             --label_N "${LABEL_N_CURRENT}" \
             --label_epsilon "${EPS_EQ}" \
-            --obj worst \
+            --obj avg \
             --with_categorical False \
             --transform_label_numerical True \
             --transform_label_categorical False \
             --test_size 0.2 \
             --random_state 42 \
             --transform_label_log "${TRANSFORM_LABEL_LOG_FLAG}" \
-            --label_index "${LABEL_INDEX_FLAG}" # <-- label_index 옵션 추가
+            --label_index True # <-- label_index 옵션 추가
         done
       else
-        # ⚠️ 회귀 데이터셋이 아닌 경우: 기존 방식대로 한 번만 실행
+        # 회귀 데이터셋이 아닌 경우: 기존 방식대로 한 번만 실행
         echo "▶️ dataset=${DATASET}, eps=${EPS_EQ}"
         python ${TRANSFORM_SCRIPT} \
           --csv_path "${CSV_PATH}" \
@@ -88,7 +90,7 @@ for DATASET in "${DATASETS[@]}"; do
           --N "${N_VAL}" \
           --label_N "${LABEL_N_CURRENT}" \
           --label_epsilon "${EPS_EQ}" \
-          --obj worst \
+          --obj avg \
           --with_categorical False \
           --transform_label_numerical True \
           --transform_label_categorical False \
